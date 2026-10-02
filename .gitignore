@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs & Browser Data
+*.log
+educoder_chrome_debug/
+
+# IDE
+.vscode/
+.idea/
+
+# Cache & Backups
+.cache/
