@@ -194,3 +194,62 @@ class TestCliExecution:
             assert data["passed"] is True
             assert data["pass_ratio"] == "3/3"
             assert data["circuit_broken"] is False
+
+    def test_parser_run_classroom_homework(self):
+        """测试 run-classroom-homework 参数解析"""
+        parser = build_parser()
+        args = parser.parse_args([
+            "run-classroom-homework",
+            "--max-tasks", "5",
+            "--min-duration", "40",
+            "--json",
+        ])
+        assert args.command == "run-classroom-homework"
+        assert args.max_tasks == 5
+        assert args.min_duration == 40
+        assert args.auto_next is True
+        assert args.json is True
+
+    def test_parser_solve_cycle_min_duration(self):
+        """测试 solve-cycle 支持 --min-duration 参数"""
+        parser = build_parser()
+        args = parser.parse_args([
+            "solve-cycle",
+            "--code", "print('hello')",
+            "--min-duration", "35",
+            "--json",
+        ])
+        assert args.command == "solve-cycle"
+        assert args.min_duration == 35
+
+    def test_cmd_run_classroom_homework_json(self, capsys):
+        """测试 run-classroom-homework CLI 执行并输出 JSON 汇总"""
+        fake_report = {
+            "status": "success",
+            "total_tasks_found": 3,
+            "tasks_processed": 1,
+            "tasks_completed": 1,
+            "tasks_skipped": 2,
+            "tasks_failed": 0,
+            "details": [
+                {
+                    "task_name": "实训大题1",
+                    "initial_status": "未完成",
+                    "final_status": "已完成",
+                    "levels_passed": 2,
+                    "success": True,
+                }
+            ],
+            "elapsed_seconds": 12.5,
+        }
+
+        with patch("src.cli.BrowserSession"), \
+             patch("src.cli.run_classroom_cruise", return_value=fake_report):
+            main(["run-classroom-homework", "--max-tasks", "2", "--min-duration", "0", "--json"])
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+
+            assert data["status"] == "success"
+            assert data["tasks_completed"] == 1
+            assert data["tasks_skipped"] == 2
+            assert len(data["details"]) == 1

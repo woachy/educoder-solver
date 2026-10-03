@@ -48,6 +48,10 @@ def backup_code_to_file(code_content: str, lang: str = "py") -> str:
     """
     _ensure_backup_dir()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    # 确保内容为字符串类型
+    if not isinstance(code_content, str):
+        code_content = str(code_content or "")
+
     # 语言映射对应扩展名
     ext_map = {
         "python": "py",
@@ -76,38 +80,74 @@ def backup_code_to_file(code_content: str, lang: str = "py") -> str:
         return ""
 
 
+def _get_all_frames(page: Any) -> list:
+    """获取页面主实例及所有子 iframe 实例列表。"""
+    frames = [page]
+    # 仅当 page.frames 为真实的列表或元组容器时遍历子 frame，兼容单元测试 Mock
+    if hasattr(page, "frames") and isinstance(page.frames, (list, tuple)):
+        for f in page.frames:
+            if f != page and f not in frames:
+                frames.append(f)
+    return frames
+
+
 def get_current_editor_code(page: Page) -> str:
-    """读取当前编辑器中的已有代码文本。"""
-    # 1. 优先通过 Monaco / Ace JS API 获取
-    if hasattr(page, "evaluate") and callable(page.evaluate):
-        try:
-            js_script = """
-            () => {
-                try {
-                    if (window.monaco && window.monaco.editor) {
-                        const models = window.monaco.editor.getModels();
-                        if (models && models.length > 0) return models[0].getValue();
-                    }
-                    if (window.ace && typeof window.ace.edit === 'function') {
-                        const el = document.querySelector('.ace_editor');
-                        if (el) return window.ace.edit(el).getValue();
-                    }
-                } catch (e) {}
-                return null;
+    """读取当前编辑器中的已有代码文本（支持跨 iframe 与 React/Vue Fiber 探查）。"""
+    frames = _get_all_frames(page)
+
+    # 1. 优先遍历所有 frames 通过 Monaco / Ace JS API 或 Fiber 对象获取
+    detect_js = """
+    () => {
+        try {
+            // 1. 全局 window.monaco
+            if (window.monaco && window.monaco.editor) {
+                const models = window.monaco.editor.getModels();
+                if (models && models.length > 0) return models[0].getValue();
             }
-            """
-            code = page.evaluate(js_script)
-            if code is not None and isinstance(code, str):
-                return code
-        except Exception as e:
-            logger.debug(f"通过 JS API 读取当前代码失败: {e}")
+            // 2. React / Vue Fiber 挂载探查
+            const editorEls = document.querySelectorAll('.monaco-editor');
+            for (const el of editorEls) {
+                const fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+                if (fiberKey) {
+                    let curr = el[fiberKey];
+                    while (curr) {
+                        const ed = (curr.memoizedProps && curr.memoizedProps.editor) || 
+                                   (curr.memoizedState && curr.memoizedState.editor);
+                        if (ed && typeof ed.getValue === 'function') {
+                            return ed.getValue();
+                        }
+                        curr = curr.return;
+                    }
+                }
+                if (el.__vue__ && el.__vue__.editor && typeof el.__vue__.editor.getValue === 'function') {
+                    return el.__vue__.editor.getValue();
+                }
+            }
+            // 3. Ace Editor
+            if (window.ace && typeof window.ace.edit === 'function') {
+                const el = document.querySelector('.ace_editor');
+                if (el) return window.ace.edit(el).getValue();
+            }
+        } catch (e) {}
+        return null;
+    }
+    """
+
+    for f in frames:
+        if hasattr(f, "evaluate") and callable(f.evaluate):
+            try:
+                code = f.evaluate(detect_js)
+                if code is not None and isinstance(code, str):
+                    return code
+            except Exception as e:
+                logger.debug(f"Frame 读取当前代码失败: {e}")
 
     # 2. 兜底从 textarea 或 DOM 文本提取
     try:
         ta = page.query_selector("textarea.editor, textarea#code, textarea")
         if ta:
             val = ta.input_value()
-            if val:
+            if val and isinstance(val, str):
                 return val
     except Exception:
         pass
@@ -236,56 +276,84 @@ def inject_code(
     method_used = "none"
     success = False
 
-    # 级别 1: Monaco Editor 原生 API
-    if hasattr(page, "evaluate") and callable(page.evaluate):
-        try:
-            monaco_js = """
-            (val) => {
-                try {
-                    if (window.monaco && window.monaco.editor) {
-                        const models = window.monaco.editor.getModels();
-                        if (models && models.length > 0) {
-                            models[0].setValue(val);
+    # 级别 1: Monaco Editor 原生 API & Fiber 深度穿透 (跨所有 frames)
+    frames = _get_all_frames(page)
+    monaco_js = """
+    (val) => {
+        try {
+            // 1. 全局 Monaco 实例
+            if (window.monaco && window.monaco.editor) {
+                const models = window.monaco.editor.getModels();
+                if (models && models.length > 0) {
+                    models[0].setValue(val);
+                    return true;
+                }
+            }
+            // 2. React / Vue Fiber 挂载探查
+            const editorEls = document.querySelectorAll('.monaco-editor');
+            for (const el of editorEls) {
+                const fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+                if (fiberKey) {
+                    let curr = el[fiberKey];
+                    while (curr) {
+                        const ed = (curr.memoizedProps && curr.memoizedProps.editor) || 
+                                   (curr.memoizedState && curr.memoizedState.editor);
+                        if (ed && typeof ed.setValue === 'function') {
+                            ed.setValue(val);
                             return true;
                         }
+                        curr = curr.return;
                     }
-                } catch (e) {}
-                return false;
+                }
+                if (el.__vue__ && el.__vue__.editor && typeof el.__vue__.editor.setValue === 'function') {
+                    el.__vue__.editor.setValue(val);
+                    return true;
+                }
             }
-            """
-            injected = page.evaluate(monaco_js, full_code)
-            if injected:
-                method_used = "monaco_api"
-                success = True
-                logger.success("通过 Monaco 原生 API (setValue) 成功注入代码")
-        except Exception as e:
-            logger.debug(f"Monaco API 注入异常: {e}")
+        } catch (e) {}
+        return false;
+    }
+    """
+    for f in frames:
+        if hasattr(f, "evaluate") and callable(f.evaluate):
+            try:
+                injected = f.evaluate(monaco_js, full_code)
+                if injected:
+                    method_used = "monaco_api"
+                    success = True
+                    logger.success("通过 Monaco 原生/Fiber 内存 API 成功注入代码")
+                    break
+            except Exception as e:
+                logger.debug(f"Frame Monaco API 注入异常: {e}")
 
-    # 级别 2: Ace Editor 原生 API
-    if not success and hasattr(page, "evaluate") and callable(page.evaluate):
-        try:
-            ace_js = """
-            (val) => {
-                try {
-                    if (window.ace && typeof window.ace.edit === 'function') {
-                        const el = document.querySelector('.ace_editor');
-                        if (el) {
-                            const ed = window.ace.edit(el);
-                            ed.setValue(val, -1);
-                            return true;
-                        }
+    # 级别 2: Ace Editor 原生 API (跨所有 frames)
+    if not success:
+        ace_js = """
+        (val) => {
+            try {
+                if (window.ace && typeof window.ace.edit === 'function') {
+                    const el = document.querySelector('.ace_editor');
+                    if (el) {
+                        const ed = window.ace.edit(el);
+                        ed.setValue(val, -1);
+                        return true;
                     }
-                } catch (e) {}
-                return false;
-            }
-            """
-            injected = page.evaluate(ace_js, full_code)
-            if injected:
-                method_used = "ace_api"
-                success = True
-                logger.success("通过 Ace 原生 API (setValue) 成功注入代码")
-        except Exception as e:
-            logger.debug(f"Ace API 注入异常: {e}")
+                }
+            } catch (e) {}
+            return false;
+        }
+        """
+        for f in frames:
+            if hasattr(f, "evaluate") and callable(f.evaluate):
+                try:
+                    injected = f.evaluate(ace_js, full_code)
+                    if injected:
+                        method_used = "ace_api"
+                        success = True
+                        logger.success("通过 Ace 原生 API (setValue) 成功注入代码")
+                        break
+                except Exception as e:
+                    logger.debug(f"Frame Ace API 注入异常: {e}")
 
     # 级别 3: 兜底方案 (聚焦 -> 全选 -> 清空 -> 键入/粘贴)
     if not success:

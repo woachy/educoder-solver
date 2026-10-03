@@ -67,6 +67,8 @@ class EvaluationManager:
     RESULT_CONTAINER_SELECTORS = [
         ".evaluate-result-container",
         ".test-result",
+        ".test-case-list",
+        ".test-set-container___JHp4n",
         ".console-output",
         ".eval-result",
         ".shixun-result",
@@ -198,11 +200,23 @@ class EvaluationManager:
         try:
             disabled = btn.get_attribute("disabled")
             btn_class = btn.get_attribute("class") or ""
+            btn_text = btn.inner_text() or ""
+            if re.search(r"\d+S", btn_text, re.IGNORECASE) or "评测中" in btn_text:
+                return False
             if not disabled and "disabled" not in btn_class and "loading" not in btn_class:
                 return True
         except Exception:
             pass
         return False
+
+    def _has_real_result(self, snapshot: str) -> bool:
+        """检查快照内容是否为真实的评测结果而非占位说明"""
+        if not snapshot:
+            return False
+        if "平台会对你编写的代码进行测试" in snapshot and not any(k in snapshot for k in ["全部通过", "测试结果", "测试集", "实际输出", "预期输出", "未通过", "耗时"]):
+            return False
+        return any(k in snapshot for k in ["全部通过", "通关成功", "测试结果", "测试集", "实际输出", "预期输出", "未通过", "错误", "Error", "Traceback", "耗时"])
+
 
     def wait_for_eval_completion(
         self,
@@ -256,18 +270,39 @@ class EvaluationManager:
             if not is_loading:
                 btn_ready = self._is_eval_btn_ready(page)
                 current_snapshot = self.get_result_snapshot(page)
-                has_new_result = (current_snapshot != pre_snapshot) if pre_snapshot else bool(current_snapshot)
+                has_new_result = (current_snapshot != pre_snapshot and self._has_real_result(current_snapshot)) if pre_snapshot else self._has_real_result(current_snapshot)
 
                 if btn_ready and has_new_result:
                     logger.info("第二阶段：评测加载结束，结果内容已产生有效更新且按钮就绪")
                     return True
 
-                if loading_detected and btn_ready:
-                    logger.info("第二阶段：评测 loading 动画已结束，按钮已恢复可用")
+                if loading_detected and btn_ready and self._has_real_result(current_snapshot):
+                    logger.info("第二阶段：评测 loading 动画已结束，已捕获有效评测结果且按钮已恢复可用")
                     return True
 
-                # 若未检测到 loading 也未捕获到旧快照，按钮就绪即视为完成
-                if not pre_snapshot and btn_ready:
+                # 优先检测 React Fiber 中的测试集结果是否已挂载就绪
+                try:
+                    fiber_ready = page.evaluate("""() => {
+                        const el = document.querySelector('.test-set-container___JHp4n') || document.querySelector('.item-desc___ivltA');
+                        if (!el) return false;
+                        const key = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+                        if (!key) return false;
+                        let curr = el[key];
+                        while (curr) {
+                            if (curr.memoizedProps && curr.memoizedProps.test_sets && curr.memoizedProps.test_sets.length > 0) return true;
+                            if (curr.memoizedProps && curr.memoizedProps.children && curr.memoizedProps.children.props && curr.memoizedProps.children.props.test_sets && curr.memoizedProps.children.props.test_sets.length > 0) return true;
+                            curr = curr.return;
+                        }
+                        return false;
+                    }""")
+                    if fiber_ready and btn_ready and (time.time() - start_time > 1.5):
+                        logger.info("第二阶段：检测到 React Fiber 测试集数据已挂载就绪")
+                        return True
+                except Exception:
+                    pass
+
+                # 若未检测到 loading 也未捕获到旧快照，必须等待检测到结果且按钮就绪
+                if not pre_snapshot and btn_ready and self._has_real_result(current_snapshot) and (time.time() - start_time > 2.5):
                     return True
 
             time.sleep(0.4)
@@ -324,8 +359,114 @@ class EvaluationManager:
             "error_msg": error_output,
         }
 
+    def _parse_network_eval_response(self, data: Any) -> Optional[Dict[str, Any]]:
+        """解析 CDP 拦截到的评测网络层 JSON 响应数据。
+
+        支持头歌常见接口格式 (test_sets 结构化测试集、had_passed、passed 状态标记等)。
+        """
+        if not isinstance(data, dict):
+            return None
+
+        # 格式 1: 包含测试集列表 (test_sets 或 test_set)
+        test_sets = data.get("test_sets") or data.get("test_set")
+        if test_sets and isinstance(test_sets, list):
+            total_count = len(test_sets)
+            passed_count = sum(
+                1 for ts in test_sets if isinstance(ts, dict) and ts.get("result") in (True, 1, "true", "passed")
+            )
+            passed = (passed_count == total_count) and total_count > 0
+            pass_ratio = f"{passed_count}/{total_count}"
+
+            expected = ""
+            actual = ""
+            diff_hint = ""
+            error_output = ""
+            for ts in test_sets:
+                if isinstance(ts, dict) and not ts.get("result"):
+                    expected = str(ts.get("expected_output") or ts.get("expected") or "").strip()
+                    actual = str(ts.get("actual_output") or ts.get("actual") or "").strip()
+                    error_output = str(ts.get("error_output") or ts.get("error") or "").strip()
+                    diff_hint = f"未通过测试集 (通过率 {pass_ratio})"
+                    break
+
+            if passed and not diff_hint:
+                diff_hint = "全部测试集评测通过"
+
+            stdout = str(data.get("compile_output") or data.get("stdout") or "").strip()
+            return {
+                "passed": passed,
+                "pass_ratio": pass_ratio,
+                "error_output": error_output,
+                "stdout": stdout,
+                "expected": expected,
+                "actual": actual,
+                "diff_hint": diff_hint,
+                "from_network": True,
+            }
+
+        # 格式 2: 包含明确 passed 布尔字段
+        if "passed" in data and isinstance(data["passed"], bool):
+            passed = data["passed"]
+            pass_ratio = data.get("pass_ratio") or ("100%" if passed else "0%")
+            return {
+                "passed": passed,
+                "pass_ratio": pass_ratio,
+                "error_output": str(data.get("error") or data.get("message") or "").strip(),
+                "stdout": str(data.get("stdout") or "").strip(),
+                "expected": str(data.get("expected") or "").strip(),
+                "actual": str(data.get("actual") or "").strip(),
+                "diff_hint": "网络层验证通过" if passed else "网络层验证未通过",
+                "from_network": True,
+            }
+
+        # 格式 3: 包含 had_passed 布尔字段
+        if "had_passed" in data and isinstance(data["had_passed"], bool):
+            passed = data["had_passed"]
+            return {
+                "passed": passed,
+                "pass_ratio": "100%" if passed else "0%",
+                "error_output": str(data.get("message") or "").strip(),
+                "stdout": "",
+                "expected": "",
+                "actual": "",
+                "diff_hint": "全部通过" if passed else "",
+                "from_network": True,
+            }
+
+        return None
+
+    def _merge_eval_results(
+        self,
+        net_result: Optional[Dict[str, Any]],
+        dom_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """融合网络层截获结果与 DOM 提取结果，网络层优先，DOM 兜底。"""
+        if not net_result:
+            return dom_result
+
+        passed = net_result.get("passed", dom_result.get("passed", False))
+        pass_ratio = net_result.get("pass_ratio") or dom_result.get("pass_ratio", "")
+        error_output = net_result.get("error_output") or dom_result.get("error_output", "")
+        stdout = dom_result.get("stdout") or net_result.get("stdout", "")
+        expected = net_result.get("expected") or dom_result.get("expected", "")
+        actual = net_result.get("actual") or dom_result.get("actual", "")
+        diff_hint = net_result.get("diff_hint") or dom_result.get("diff_hint", "")
+
+        return {
+            "passed": passed,
+            "pass_ratio": pass_ratio,
+            "error_output": error_output,
+            "stdout": stdout,
+            "raw_output": dom_result.get("raw_output") or f"Expected: {expected}\nActual: {actual}",
+            "expected": expected,
+            "actual": actual,
+            "diff_hint": diff_hint,
+            "stdout_msg": stdout,
+            "error_msg": error_output,
+        }
+
     def trigger_and_wait_eval(self, page: Page, timeout_seconds: int = 60) -> Dict[str, Any]:
-        """触发评测并等待结果回执，内置两阶段防竞态监听与熔断保护。
+        """触发评测并等待结果回执，双轨拦截（网络层优先 + DOM兜底）与自愈熔断保护。
 
         Args:
             page: Playwright Page 实例
@@ -382,34 +523,66 @@ class EvaluationManager:
                 "message": msg,
             }
 
-        # 5. 拟真点击评测按钮
-        logger.info("正在拟真点击评测按钮...")
+        # 5. 拟真点击评测按钮与双轨网络层监听
+        logger.info("正在拟真点击评测按钮 (网络层拦截优先 + DOM兜底)...")
         random_delay(0.3, 0.8)
-        try:
-            eval_btn.click()
-            self.total_eval_count += 1
-        except Exception as e:
-            logger.error(f"点击评测按钮失败: {e}")
-            return {
-                "success": False,
-                "passed": False,
-                "pass_ratio": "",
-                "error_output": str(e),
-                "stdout": "",
-                "expected": "",
-                "actual": "",
-                "diff_hint": f"点击评测异常: {e}",
-                "stdout_msg": "",
-                "error_msg": str(e),
-                "circuit_broken": self.circuit_broken,
-                "message": f"点击评测按钮异常: {e}",
-            }
+
+        net_eval_result = None
+        btn_clicked = False
+
+        if hasattr(page, "expect_response") and callable(page.expect_response):
+            try:
+                # 监听可能的评测后端接口响应
+                with page.expect_response(
+                    lambda r: any(k in r.url.lower() for k in ["evaluate", "test_sets", "shixun_eval", "shixuns/"]) and r.status == 200,
+                    timeout=min(timeout_seconds * 1000, 15000),
+                ) as response_info:
+                    eval_btn.click()
+                    btn_clicked = True
+                    self.total_eval_count += 1
+
+                resp = response_info.value
+                if hasattr(resp, "json") and callable(resp.json):
+                    try:
+                        net_data = resp.json()
+                        net_eval_result = self._parse_network_eval_response(net_data)
+                        if net_eval_result:
+                            logger.info(
+                                f"网络层评测拦截命中成功: 通过率={net_eval_result.get('pass_ratio')}, 通过={net_eval_result.get('passed')}"
+                            )
+                    except Exception as je:
+                        logger.debug(f"解析评测网络响应 JSON 失败: {je}")
+            except Exception as ne:
+                logger.debug(f"网络层监听未捕获或超时 ({ne})，平滑回退至两阶段 DOM 监听")
+
+        if not btn_clicked:
+            try:
+                eval_btn.click()
+                btn_clicked = True
+                self.total_eval_count += 1
+            except Exception as e:
+                logger.error(f"点击评测按钮失败: {e}")
+                return {
+                    "success": False,
+                    "passed": False,
+                    "pass_ratio": "",
+                    "error_output": str(e),
+                    "stdout": "",
+                    "expected": "",
+                    "actual": "",
+                    "diff_hint": f"点击评测异常: {e}",
+                    "stdout_msg": "",
+                    "error_msg": str(e),
+                    "circuit_broken": self.circuit_broken,
+                    "message": f"点击评测按钮异常: {e}",
+                }
 
         # 6. 两阶段防竞态监听评测状态结束
         self.wait_for_eval_completion(page, timeout_seconds=timeout_seconds, pre_snapshot=pre_snapshot)
 
-        # 7. 提取评测回执
-        eval_result = self.extract_eval_results(page)
+        # 7. 提取评测回执 (双轨融合)
+        dom_result = self.extract_eval_results(page)
+        eval_result = self._merge_eval_results(net_eval_result, dom_result)
         passed = eval_result.get("passed", False)
         error_output = eval_result.get("error_output", "")
         pass_ratio = eval_result.get("pass_ratio", "")

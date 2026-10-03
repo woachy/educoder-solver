@@ -29,6 +29,7 @@ from src.browser.manager import (
 )
 from src.config import config
 from src.executor.blank_action import submit_blank_answer
+from src.executor.classroom_orchestrator import run_classroom_cruise
 from src.executor.choice_action import submit_choice_answer
 from src.executor.editor_action import inject_code
 from src.executor.eval_action import EvaluationManager
@@ -430,6 +431,7 @@ def cmd_solve_cycle(args: argparse.Namespace) -> None:
     target_only = not args.full
     timeout = args.timeout or 60
     auto_next = args.auto_next
+    min_duration = getattr(args, "min_duration", 60)
 
     try:
         with BrowserSession() as session:
@@ -440,6 +442,7 @@ def cmd_solve_cycle(args: argparse.Namespace) -> None:
                 target_only=target_only,
                 auto_next=auto_next,
                 timeout=timeout,
+                min_duration=min_duration,
             )
 
             if json_mode:
@@ -470,6 +473,58 @@ def cmd_solve_cycle(args: argparse.Namespace) -> None:
                         border_style=status_color,
                     )
                 )
+    except Exception as e:
+        _handle_connection_error(e, json_mode)
+
+
+def cmd_run_classroom_homework(args: argparse.Namespace) -> None:
+    """全自动巡航编排执行课堂大作业"""
+    json_mode = args.json or config.log.json_mode
+    max_tasks = getattr(args, "max_tasks", 10) or 10
+    min_duration = getattr(args, "min_duration", 60) if getattr(args, "min_duration", None) is not None else 60
+    auto_next = getattr(args, "auto_next", True)
+
+    try:
+        with BrowserSession() as session:
+            page = session.get_target_page(config.browser.target_domain)
+            report = run_classroom_cruise(
+                page=page,
+                max_tasks=max_tasks,
+                min_duration=min_duration,
+                auto_next=auto_next,
+            )
+
+            if json_mode:
+                print_json_result(report)
+            else:
+                table = Table(title="课堂大作业全自动巡航通关报表")
+                table.add_column("序号", justify="center", style="cyan")
+                table.add_column("大题名称", style="white")
+                table.add_column("初始状态", style="yellow")
+                table.add_column("最终状态", style="green")
+                table.add_column("通关关卡数", justify="center")
+
+                for idx, t in enumerate(report.get("details", []), 1):
+                    status_style = "bold green" if t.get("success") else "bold red"
+                    final_str = f"[{status_style}]{t.get('final_status')}[/{status_style}]"
+                    table.add_row(
+                        str(idx),
+                        t.get("task_name", ""),
+                        t.get("initial_status", ""),
+                        final_str,
+                        str(t.get("levels_passed", 0)),
+                    )
+
+                console.print(table)
+                summary_panel = [
+                    f"发现总大题: [cyan]{report.get('total_tasks_found')}[/cyan]",
+                    f"处理大题数: [bold]{report.get('tasks_processed')}[/bold]",
+                    f"通关成功数: [bold green]{report.get('tasks_completed')}[/bold green]",
+                    f"失败大题数: [bold red]{report.get('tasks_failed')}[/bold red]",
+                    f"已跳过题数: [dim]{report.get('tasks_skipped')}[/dim]",
+                    f"全流程耗时: [dim]{report.get('elapsed_seconds')}s[/dim]",
+                ]
+                console.print(Panel("\n".join(summary_panel), title="巡航编排执行摘要", border_style="cyan"))
     except Exception as e:
         _handle_connection_error(e, json_mode)
 
@@ -536,7 +591,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_cycle.add_argument("--full", action="store_true", help="全量替换代码，禁用 Begin-End 靶心保护组装")
     p_cycle.add_argument("--auto-next", action="store_true", help="评测通过后自动点击‘下一关’")
     p_cycle.add_argument("--timeout", type=int, default=60, help="最长评测等待超时 (秒，默认 60)")
+    p_cycle.add_argument("--min-duration", type=int, default=60, help="单题防秒刷最小作答总时长 (秒，默认 60，设为 0 直出)")
     p_cycle.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
+    # 9. run-classroom-homework (课堂大作业全自动巡航编排)
+    p_cruise = subparsers.add_parser("run-classroom-homework", help="全自动巡航编排跑完课堂实训大作业")
+    p_cruise.add_argument("--max-tasks", type=int, default=10, help="最大连续推进大题数量 (默认 10)")
+    p_cruise.add_argument("--min-duration", type=int, default=60, help="单题防秒刷最小作答总时长 (秒，默认 60，设为 0 直出)")
+    p_cruise.add_argument("--auto-next", action="store_true", default=True, help="关卡通过后自动流转下一关 (默认 True)")
+    p_cruise.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
     return parser
 
@@ -564,6 +627,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         "trigger-eval": cmd_trigger_eval,
         "submit-answer": cmd_submit_answer,
         "solve-cycle": cmd_solve_cycle,
+        "run-classroom-homework": cmd_run_classroom_homework,
     }
 
     handler = handlers.get(args.command)

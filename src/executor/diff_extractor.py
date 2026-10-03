@@ -282,6 +282,43 @@ def extract_testcase_diff(page_or_html: Union[Page, str, Any]) -> Dict[str, Any]
     for tag in soup(["script", "style", "svg", "noscript"]):
         tag.decompose()
 
+    # 0. 若为 Page 实例，优先从 React Fiber 状态树精准提取测试集数据 (避免 canvas/xterm 渲染导致的文本丢失)
+    if hasattr(page_or_html, "evaluate"):
+        try:
+            fiber_data = page_or_html.evaluate("""() => {
+                const el = document.querySelector('.test-set-container___JHp4n') || document.querySelector('.item-desc___ivltA') || document.querySelector('.btn-run___fh7pl');
+                if (!el) return null;
+                const key = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+                if (!key) return null;
+                let curr = el[key];
+                while (curr) {
+                    if (curr.memoizedProps && curr.memoizedProps.test_sets) return curr.memoizedProps.test_sets;
+                    if (curr.memoizedProps && curr.memoizedProps.children && curr.memoizedProps.children.props && curr.memoizedProps.children.props.test_sets) return curr.memoizedProps.children.props.test_sets;
+                    curr = curr.return;
+                }
+                return null;
+            }""")
+            if fiber_data and isinstance(fiber_data, list) and len(fiber_data) > 0:
+                total_cnt = len(fiber_data)
+                pass_cnt = sum(1 for ts in fiber_data if ts.get("result") is True)
+                ratio_str = f"{pass_cnt}/{total_cnt}"
+                is_all_passed = (pass_cnt == total_cnt)
+                first_fail = next((ts for ts in fiber_data if ts.get("result") is not True), None)
+                expected_str = clean_text_content(first_fail.get("output", "")) if first_fail else ""
+                actual_str = clean_text_content(first_fail.get("actual_output", "")) if first_fail else ""
+                diff_hint_str = generate_diff_hint(expected_str, actual_str, "", is_all_passed, ratio_str)
+                return {
+                    "passed": is_all_passed,
+                    "pass_ratio": ratio_str,
+                    "expected": expected_str,
+                    "actual": actual_str,
+                    "diff_hint": diff_hint_str,
+                    "stdout_msg": f"测试用例通过率: {ratio_str}",
+                    "error_msg": "",
+                }
+        except Exception:
+            pass
+
     full_text = soup.get_text(separator="\n", strip=True)
 
     # 2. 优先检测通关弹窗 .evaluate-result-container

@@ -17,6 +17,7 @@ from playwright.sync_api import Page
 from src.executor.editor_action import inject_code
 from src.executor.eval_action import EvaluationManager
 from src.executor.modal_sweeper import dismiss_blocking_overlays
+from src.executor.pacing import pacing_controller
 from src.extractor.base import QuestionData
 from src.utils.logger import logger
 
@@ -27,10 +28,12 @@ def run_solve_cycle(
     target_only: bool = True,
     auto_next: bool = False,
     timeout: int = 60,
+    min_duration: int = 0,
     eval_manager: Optional[EvaluationManager] = None,
     question_data: Optional[QuestionData] = None,
+    task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """在单个页面会话中执行“清理弹窗 -> 注入代码 -> 评测监听 -> 提纯Diff -> 流转下一关”完整闭环。
+    """在单个页面会话中执行“清理弹窗 -> 注入代码 -> 控速等待 -> 评测监听 -> 提纯Diff -> 流转下一关”完整闭环。
 
     Args:
         page: Playwright Page 页面实例
@@ -38,25 +41,13 @@ def run_solve_cycle(
         target_only: 是否仅替换 Begin-End 靶心区域 (默认 True)
         auto_next: 评测全绿后是否自动点击“下一关” (默认 False)
         timeout: 评测等待超时上限 (秒，默认 60)
+        min_duration: 防秒刷最小作答总时长 (秒，<= 0 直出自测)
         eval_manager: 可选的 EvaluationManager 实例 (用于延续熔断状态)
         question_data: 可选的预探测实训题目数据
+        task_id: 可选的题目唯一 ID (用于控速打卡跟踪)
 
     Returns:
-        dict: 结构化低熵流水线回执字典:
-            - success (bool): 全流程交互是否执行成功
-            - passed (bool): 评测是否全部通过
-            - pass_ratio (str): 测试用例通过比例 (如 "1/1", "0/2")
-            - expected (str): 预期输出
-            - actual (str): 实际输出
-            - diff_hint (str): 高密度差异提示
-            - stdout_msg (str): 控制台标准输出
-            - error_msg (str): 错误异常栈
-            - circuit_broken (bool): 是否触发连续相同报错熔断
-            - next_level_triggered (bool): 是否成功点击进入下一关
-            - overlays_dismissed (int): 清理的遮罩/弹窗数量
-            - elapsed_seconds (float): 流水线执行耗时 (秒)
-            - injection (dict): 代码注入元信息
-            - message (str): 状态说明
+        dict: 结构化低熵流水线回执字典
     """
     start_time = time.time()
     logger.info(">>> 启动复合答题流水线 (Solve Cycle) <<<")
@@ -95,7 +86,15 @@ def run_solve_cycle(
             "message": err_msg,
         }
 
-    # 3. 触发评测并两阶段监听回执
+    # 3. 拟真思考防刷控速 (根据题目开题已耗时智能补足差额)
+    if min_duration > 0:
+        pacing_controller.wait_thinking_pacing(
+            page=page,
+            min_duration=min_duration,
+            task_id=task_id,
+        )
+
+    # 4. 触发评测并两阶段监听回执
     eval_res = eval_mgr.trigger_and_wait_eval(page, timeout_seconds=timeout)
 
     passed = eval_res.get("passed", False)

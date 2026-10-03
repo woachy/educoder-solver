@@ -144,6 +144,97 @@ class PracticalExtractor(BaseExtractor):
             },
         )
 
+    @staticmethod
+    def table_to_markdown(table_element: Tag) -> str:
+        """将 HTML <table> 元素转换为标准格式的 Markdown 表格文本。
+
+        支持自动对齐列数、表头识别与特殊符号转义，保留结构化数据字段。
+        """
+        if not table_element:
+            return ""
+
+        rows = table_element.find_all("tr")
+        if not rows:
+            return ""
+
+        table_data: List[List[str]] = []
+        for r in rows:
+            cells = r.find_all(["th", "td"])
+            if not cells:
+                continue
+            row_vals = []
+            for c in cells:
+                text = c.get_text(" ", strip=True)
+                clean_cell = re.sub(r"\s+", " ", text).replace("|", "\\|")
+                row_vals.append(clean_cell)
+            if row_vals:
+                table_data.append(row_vals)
+
+        if not table_data:
+            return ""
+
+        max_cols = max(len(r) for r in table_data)
+        if max_cols == 0:
+            return ""
+
+        normalized_data = []
+        for r in table_data:
+            padded = r + [""] * (max_cols - len(r))
+            normalized_data.append(padded)
+
+        header = normalized_data[0]
+        separator = ["---"] * max_cols
+
+        lines = [
+            "| " + " | ".join(header) + " |",
+            "| " + " | ".join(separator) + " |",
+        ]
+
+        for row in normalized_data[1:]:
+            lines.append("| " + " | ".join(row) + " |")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def clean_multimodal_elements(node: Tag) -> None:
+        """提纯和规范化多模态元素（图片附件与嵌入图像），杜绝大段 base64 噪音涌入上下文。"""
+        if not node:
+            return
+
+        for img in list(node.find_all("img")):
+            src = img.get("src", "") or ""
+            alt = (img.get("alt") or "").strip()
+            title = (img.get("title") or "").strip()
+
+            if "api/attachments" in src:
+                name = alt or title
+                if not name:
+                    # 从 URL 路径截取文件名
+                    clean_src = src.split("?")[0].split("#")[0]
+                    name = clean_src.split("/")[-1] if "/" in clean_src else "附件图片"
+                annot = f"[附图说明: {name or '附件图片'}]"
+            elif src.startswith("data:image"):
+                label = alt or title or "嵌入图像"
+                annot = f"[图片: {label}]"
+            elif src:
+                clean_src = src.split("?")[0].split("#")[0]
+                fname = clean_src.split("/")[-1] if "/" in clean_src else "插图"
+                name = alt or title or fname or "插图"
+                annot = f"[图片: {name}]"
+            else:
+                annot = ""
+
+            if not annot:
+                img.decompose()
+                continue
+
+            # 如果父节点为容器层（如 div），包装为 p 标签以便提取器结构化采集
+            if img.parent and img.parent.name in ["p", "span", "td", "th", "li"]:
+                img.replace_with(f" {annot} ")
+            else:
+                new_p = BeautifulSoup(f"<p>{annot}</p>", "html.parser").find("p")
+                img.replace_with(new_p)
+
     def _extract_left_pane_sections(self, soup: BeautifulSoup) -> Dict[str, str]:
         """解析左侧面板的各个版块 (任务描述, 编程要求, 测试说明, 评测说明等)"""
         left_node: Optional[Tag] = None
@@ -154,6 +245,9 @@ class PracticalExtractor(BaseExtractor):
 
         if not left_node:
             left_node = soup.body if soup.body else soup
+
+        # 预先清洗图片等多模态元素
+        self.clean_multimodal_elements(left_node)
 
         # 提取标题
         title = ""
@@ -170,10 +264,23 @@ class PracticalExtractor(BaseExtractor):
 
         current_section = "task_description"
 
-        # 遍历所有标题和段落提取结构化板块
-        elements = left_node.find_all(["h1", "h2", "h3", "h4", "h5", "p", "div", "pre", "ul", "ol"])
-        
+        # 遍历所有标题、段落及表格元素
+        elements = left_node.find_all(["h1", "h2", "h3", "h4", "h5", "p", "div", "pre", "ul", "ol", "table"])
+        handled_tables = set()
+
         for elem in elements:
+            # 处理表格元素
+            if elem.name == "table":
+                md_table = self.table_to_markdown(elem)
+                if md_table:
+                    sections[current_section].append(md_table)
+                handled_tables.add(elem)
+                continue
+
+            # 若元素位于已处理的 table 内部，则跳过防止重复提取
+            if any(parent in handled_tables for parent in elem.parents):
+                continue
+
             # 仅处理直接包含有意义文本且不属于更深层嵌套重复计数的节点
             elem_text = elem.get_text(" ", strip=True)
             if not elem_text:
@@ -198,7 +305,7 @@ class PracticalExtractor(BaseExtractor):
                     continue
 
             # 避免将整块大 container 重复加入
-            if elem.name in ["p", "pre", "ul", "ol"] or (elem.name == "div" and not elem.find(["p", "div"])):
+            if elem.name in ["p", "pre", "ul", "ol"] or (elem.name == "div" and not elem.find(["p", "div", "table"])):
                 sections[current_section].append(elem_text)
 
         result: Dict[str, str] = {

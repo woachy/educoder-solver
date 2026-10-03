@@ -37,6 +37,7 @@ class SafetyConfig:
     """风控与安全熔断配置"""
     max_consecutive_unchanged_errors: int = 3  # 连续报错无变化熔断阈值
     max_eval_retries_per_question: int = 5     # 单题最大评测重试次数
+    min_task_duration: int = 60                # 单题最小作答耗时限制 (秒)，防止教师端审查秒刷
 
 
 @dataclass
@@ -53,6 +54,7 @@ class AppConfig:
     delay: DelayConfig = field(default_factory=DelayConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     log: LogConfig = field(default_factory=LogConfig)
+    min_task_duration: int = 60  # 默认单题控速最小作答时长 (秒)
 
 
 # 全局单例配置对象
