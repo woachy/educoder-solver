@@ -122,3 +122,69 @@ def test_run_classroom_cruise_flow():
         # 验证主页切回与刷新
         mock_page.bring_to_front.assert_called_once()
         mock_page.reload.assert_called_once()
+
+
+def test_run_classroom_cruise_interactive_mode():
+    """测试 interactive=True 下 stdio JSON Lines 双向交互协议"""
+    import io
+    import json
+
+    mock_page = MagicMock()
+    mock_btn = MagicMock()
+    fake_tasks = [
+        {"index": 0, "title": "交互大题1", "is_completed": False, "button": mock_btn},
+    ]
+
+    mock_task_page = MagicMock()
+    mock_task_page.content.return_value = "<html><body><div class='shixun-left'><h3>SQL实验</h3></div></body></html>"
+    mock_task_page.url = "http://educoder.net/shixun/interactive"
+    mock_task_page.query_selector.return_value = None
+
+    mock_context = MagicMock()
+    mock_page.context = mock_context
+    mock_context.expect_page.return_value.__enter__.return_value = MagicMock(value=mock_task_page)
+    mock_context.pages = [mock_page, mock_task_page]
+
+    # 模拟 Agent 在 stdin 输入指令
+    agent_action = json.dumps({"action": "solve", "code": "SELECT 1;", "target_only": True}) + "\n"
+    fake_stdin = io.StringIO(agent_action)
+    fake_stdout = io.StringIO()
+
+    mock_solve_res = {
+        "success": True,
+        "passed": True,
+        "pass_ratio": "1/1",
+        "diff_hint": "通过",
+        "circuit_broken": False,
+    }
+
+    with patch("src.executor.classroom_orchestrator.scan_classroom_tasks", return_value=fake_tasks), \
+         patch("src.executor.classroom_orchestrator.dismiss_blocking_overlays"), \
+         patch("src.executor.classroom_orchestrator.random_delay"), \
+         patch("src.executor.classroom_orchestrator.run_solve_cycle", return_value=mock_solve_res) as mock_cycle, \
+         patch("sys.stdin", fake_stdin), \
+         patch("sys.stdout", fake_stdout):
+
+        report = run_classroom_cruise(
+            page=mock_page,
+            max_tasks=1,
+            min_duration=0,
+            auto_next=True,
+            interactive=True,
+        )
+
+        assert report["status"] == "success"
+        assert report["tasks_completed"] == 1
+        # 验证 run_solve_cycle 被调用且代码为 Agent 提供的 SELECT 1;
+        mock_cycle.assert_called_once()
+        assert mock_cycle.call_args[1]["code"] == "SELECT 1;"
+
+        # 验证 stdout 中输出了 question_detected 与 eval_result 事件
+        stdout_lines = [line.strip() for line in fake_stdout.getvalue().splitlines() if line.strip()]
+        assert len(stdout_lines) >= 2
+        ev1 = json.loads(stdout_lines[0])
+        assert ev1["event"] == "question_detected"
+        assert ev1["task_title"] == "交互大题1"
+        ev2 = json.loads(stdout_lines[1])
+        assert ev2["event"] == "eval_result"
+        assert ev2["passed"] is True

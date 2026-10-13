@@ -21,6 +21,10 @@ from src.executor.editor_action import (
 from src.executor.eval_action import EvaluationManager
 from src.executor.modal_sweeper import dismiss_blocking_overlays
 from src.executor.pipeline import run_solve_cycle
+from src.executor.terminal_action import (
+    inject_terminal_command,
+    read_terminal_output,
+)
 
 __all__ = [
     "submit_choice_answer",
@@ -32,4 +36,6 @@ __all__ = [
     "dismiss_blocking_overlays",
     "extract_testcase_diff",
     "run_solve_cycle",
+    "inject_terminal_command",
+    "read_terminal_output",
 ]

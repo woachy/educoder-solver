@@ -233,6 +233,7 @@ def inject_code(
             "method_used": "none",
             "full_code": "",
             "is_target_assembled": False,
+            "fallback_to_full": False,
             "message": "待注入代码不能为空",
         }
 
@@ -252,6 +253,7 @@ def inject_code(
     # 3. 靶心代码组装判定
     full_code = new_code
     is_assembled = False
+    fallback_to_full = False
 
     if target_only:
         # 尝试从 question_data 获取切分信息，或基于当前代码动态切分
@@ -270,7 +272,8 @@ def inject_code(
             full_code, is_assembled = assemble_target_code(new_code, prefix_code, suffix_code, has_marker)
             logger.info("已成功将新代码安全组装至 Begin-End 靶心区域")
         else:
-            logger.info("未检测到 Begin-End 靶心标记，将执行完整代码写入")
+            fallback_to_full = True
+            logger.info("未检测到 Begin-End 靶心标记，将自动降级执行完整代码写入 (fallback_to_full)")
 
     # 4. 执行分级安全注入
     method_used = "none"
@@ -425,6 +428,7 @@ def inject_code(
         "full_code": full_code,
         "target_only": target_only,
         "is_target_assembled": is_assembled,
+        "fallback_to_full": fallback_to_full,
         "message": (
             f"代码安全注入成功 (方法: {method_used}, 备份: {backup_path})"
             if success

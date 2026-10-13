@@ -248,8 +248,54 @@ class TestCliExecution:
             main(["run-classroom-homework", "--max-tasks", "2", "--min-duration", "0", "--json"])
             captured = capsys.readouterr()
             data = json.loads(captured.out)
-
             assert data["status"] == "success"
             assert data["tasks_completed"] == 1
             assert data["tasks_skipped"] == 2
             assert len(data["details"]) == 1
+
+    def test_parser_submit_terminal(self):
+        """测试 submit-terminal 命令行参数解析"""
+        parser = build_parser()
+        args = parser.parse_args(["submit-terminal", "--cmd", "SHOW DATABASES;", "--read", "--eval", "--json"])
+        assert args.command == "submit-terminal"
+        assert args.cmd == "SHOW DATABASES;"
+        assert args.read is True
+        assert args.eval is True
+        assert args.json is True
+
+    def test_parser_run_classroom_homework_interactive(self):
+        """测试 run-classroom-homework --interactive 命令行参数解析"""
+        parser = build_parser()
+        args = parser.parse_args(["run-classroom-homework", "--interactive", "--json"])
+        assert args.command == "run-classroom-homework"
+        assert args.interactive is True
+        assert args.json is True
+
+    def test_cmd_submit_terminal_json(self, capsys):
+        """测试 submit-terminal CLI 执行及 JSON 结构化回执"""
+        with patch("src.cli.BrowserSession") as mock_session_cls, \
+             patch("src.cli.dismiss_blocking_overlays"), \
+             patch("src.cli.inject_terminal_command", return_value=True) as mock_inject, \
+             patch("src.cli.read_terminal_output", return_value="mysql> Database created"):
+
+            main(["submit-terminal", "--cmd", "CREATE DATABASE test;", "--read", "--json"])
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+
+            assert data["status"] == "success"
+            assert data["injected"] is True
+            assert data["command"] == "CREATE DATABASE test;"
+            assert "Database created" in data["terminal_output"]
+
+    def test_cmd_submit_answer_terminal_route(self, capsys):
+        """测试 submit-answer --type terminal 路由到终端执行"""
+        with patch("src.cli.BrowserSession"), \
+             patch("src.cli.dismiss_blocking_overlays"), \
+             patch("src.cli.inject_terminal_command", return_value=True):
+
+            main(["submit-answer", "--type", "terminal", "--data", "ls -la", "--json"])
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+
+            assert data["status"] == "success"
+            assert data["command"] == "ls -la"

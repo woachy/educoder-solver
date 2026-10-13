@@ -50,13 +50,13 @@ class PracticalExtractor(BaseExtractor):
         "textarea.editor-input",
     ]
 
-    # Begin 与 End 区域正则 (适配各类语言风格: //, #, --, /*, <!--, %, REM, 及多星号/井号修饰，兼容 \\xa0 空格)
+    # Begin 与 End 区域正则 (适配各类语言风格: //, #, --, /*, <!--, %, REM, 及多星号/井号修饰，兼容 \xa0 空格，兼容各类中文注释风格)
     BEGIN_PATTERN = re.compile(
-        r"^[\s\xa0]*(?://|#|--|/\*|<!--|%|REM)?[\s\xa0*#=\-_~]*\b(BEGIN|START)\b[\s\xa0*#=\-_~]*(?:\*/|-->)?[\s\xa0]*$",
+        r"^[\s\xa0]*(?://|#|--|/\*|<!--|%|REM)?[\s\xa0*#=\-_~]*(?:\b(?:BEGIN|START)\b|代码开始|开始编写(?:你的)?代码|开始(?:答题|编写|作答)?|在此处编写代码)[\s\xa0*#=\-_~]*(?:\*/|-->)?[\s\xa0]*$",
         re.IGNORECASE,
     )
     END_PATTERN = re.compile(
-        r"^[\s\xa0]*(?://|#|--|/\*|<!--|%|REM)?[\s\xa0*#=\-_~]*\b(END|STOP)\b[\s\xa0*#=\-_~]*(?:\*/|-->)?[\s\xa0]*$",
+        r"^[\s\xa0]*(?://|#|--|/\*|<!--|%|REM)?[\s\xa0*#=\-_~]*(?:\b(?:END|STOP)\b|代码结束|结束编写(?:你的)?代码|结束(?:答题|编写|作答)?)[\s\xa0*#=\-_~]*(?:\*/|-->)?[\s\xa0]*$",
         re.IGNORECASE,
     )
 
@@ -115,6 +115,16 @@ class PracticalExtractor(BaseExtractor):
         title = left_sections.get("title") or "编程实训任务"
         desc = left_sections.get("task_description") or ""
 
+        # 5. 探测 SQL 数据库方言 (如 mysql, sqlserver, postgresql, oracle)
+        combined_text = f"{title}\n{desc}\n{left_sections.get('requirements', '')}\n{left_sections.get('eval_instructions', '')}"
+        db_dialect = self.detect_sql_dialect(text=combined_text, code=code)
+        if db_dialect and (not language or language == "sql"):
+            language = "sql"
+
+        # 若识别出数据库方言，在 desc 开头注入醒目标记，赋能 Agent 推理
+        if db_dialect:
+            desc = f"> [!NOTE] 经检测本关卡数据库方言为: {db_dialect}\n\n{desc}"
+
         practical_details = PracticalDetails(
             task_description=desc,
             requirements=left_sections.get("requirements", ""),
@@ -129,6 +139,15 @@ class PracticalExtractor(BaseExtractor):
             editor_type=editor_type,
         )
 
+        metadata = {
+            "has_target_marker": has_marker,
+            "language": language,
+            "editor_type": editor_type,
+            "code_length": len(code),
+        }
+        if db_dialect:
+            metadata["db_dialect"] = db_dialect
+
         return QuestionData(
             type=QuestionType.PRACTICAL,
             title=title,
@@ -136,13 +155,73 @@ class PracticalExtractor(BaseExtractor):
             options=[],
             blanks=[],
             practical_details=practical_details,
-            metadata={
-                "has_target_marker": has_marker,
-                "language": language,
-                "editor_type": editor_type,
-                "code_length": len(code),
-            },
+            metadata=metadata,
         )
+
+    @staticmethod
+    def detect_sql_dialect(text: str = "", code: str = "") -> Optional[str]:
+        """探测 SQL 实训题目所属的数据库引擎方言 (如 sqlserver, mysql, postgresql, oracle)。
+
+        Args:
+            text: 题干描述与要求文本
+            code: 编辑器中已有模板或代码
+
+        Returns:
+            Optional[str]: 方言标识或 None
+        """
+        combined = f"{text}\n{code}".strip()
+        if not combined:
+            return None
+
+        # 1. SQL Server / T-SQL 特征
+        sqlserver_patterns = [
+            r"(?m)^\s*GO\s*$",
+            r"\bsys\.databases\b",
+            r"\bsysobjects\b",
+            r"\bsp_\w+",
+            r"\bIDENTITY\s*\(",
+            r"\bsqlserver\b",
+            r"\bt-sql\b",
+            r"\bmssql\b",
+            r"\bTOP\s+\d+\b",
+        ]
+        if any(re.search(pat, combined, re.IGNORECASE) for pat in sqlserver_patterns):
+            return "sqlserver"
+
+        # 2. PostgreSQL 特征
+        pg_patterns = [
+            r"\bSERIAL\b",
+            r"\bpg_catalog\b",
+            r"\bpg_\w+",
+            r"\bpostgresql\b",
+            r"\bpostgres\b",
+        ]
+        if any(re.search(pat, combined, re.IGNORECASE) for pat in pg_patterns):
+            return "postgresql"
+
+        # 3. Oracle 特征
+        oracle_patterns = [
+            r"\bVARCHAR2\b",
+            r"\bNUMBER\s*\(",
+            r"\boracle\b",
+            r"\bFROM\s+DUAL\b",
+        ]
+        if any(re.search(pat, combined, re.IGNORECASE) for pat in oracle_patterns):
+            return "oracle"
+
+        # 4. MySQL 特征
+        mysql_patterns = [
+            r"\bAUTO_INCREMENT\b",
+            r"\binformation_schema\b",
+            r"\bSHOW\s+DATABASES\b",
+            r"\bENGINE\s*=\s*InnoDB\b",
+            r"\bmysql\b",
+            r"\bLIMIT\s+\d+\b",
+        ]
+        if any(re.search(pat, combined, re.IGNORECASE) for pat in mysql_patterns):
+            return "mysql"
+
+        return None
 
     @staticmethod
     def table_to_markdown(table_element: Tag) -> str:

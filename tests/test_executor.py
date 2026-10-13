@@ -232,7 +232,22 @@ class TestEditorAction:
 
             assert result["success"] is True
             assert result["method_used"] == "monaco_api"
+            assert result["fallback_to_full"] is False
             assert os.path.exists(result["backup_path"])
+
+    def test_inject_code_fallback_to_full_when_no_marker(self, tmp_path):
+        """测试 target_only=True 但代码中无 Begin-End 标记时自适应降级 fallback_to_full"""
+        mock_page = MagicMock()
+        mock_page.evaluate.side_effect = [
+            "# 没有标记的模板代码\nprint('old')",
+            True,
+        ]
+        with patch("src.executor.editor_action.BACKUP_DIR", tmp_path):
+            result = inject_code(mock_page, "print('new')", target_only=True)
+            assert result["success"] is True
+            assert result["fallback_to_full"] is True
+            assert result["is_target_assembled"] is False
+            assert result["full_code"] == "print('new')"
 
     def test_inject_code_keyboard_fallback(self, tmp_path):
         """测试 Monaco 与 Ace API 均失败时自动降级至键盘选中覆盖"""

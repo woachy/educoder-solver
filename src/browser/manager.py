@@ -8,6 +8,7 @@
 """
 
 import socket
+import time
 from typing import Any, Dict, List, Optional
 from playwright.sync_api import Browser, Page, Playwright, sync_playwright
 
@@ -56,11 +57,15 @@ class BrowserSession:
         port: Optional[int] = None,
         timeout: float = 1.0,
         connect_timeout_ms: Optional[int] = None,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
     ):
         self.host = host or config.browser.host
         self.port = port or config.browser.port
         self.timeout = timeout
         self.connect_timeout_ms = connect_timeout_ms or config.browser.connect_timeout_ms
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
         self._playwright_cm: Optional[Any] = None
         self.playwright: Optional[Playwright] = None
         self.browser: Optional[Browser] = None
@@ -87,15 +92,34 @@ class BrowserSession:
         logger.info(f"CDP 端口探活成功，正在连接 {self.cdp_url} ...")
         self._playwright_cm = sync_playwright()
         self.playwright = self._playwright_cm.start()
-        try:
-            self.browser = self.playwright.chromium.connect_over_cdp(
-                self.cdp_url,
-                timeout=self.connect_timeout_ms,
-            )
-            logger.success(f"已成功通过 CDP 挂载物理浏览器会话")
-        except Exception as e:
-            self.__exit__(None, None, None)
-            raise ConnectionError(f"连接 CDP 失败: {str(e)}") from e
+
+        retries = max(1, self.max_retries)
+        for attempt in range(1, retries + 1):
+            try:
+                self.browser = self.playwright.chromium.connect_over_cdp(
+                    self.cdp_url,
+                    timeout=self.connect_timeout_ms,
+                )
+                logger.success("已成功通过 CDP 挂载物理浏览器会话")
+                return self
+            except Exception as e:
+                if attempt < retries:
+                    delay = self.retry_delay * attempt
+                    logger.warning(
+                        f"CDP 连接失败 (尝试 {attempt}/{retries}): {e}，将在 {delay:.1f} 秒后重试..."
+                    )
+                    time.sleep(delay)
+                else:
+                    self.__exit__(None, None, None)
+                    err_msg = (
+                        f"连接 CDP 失败 (已重试 {retries} 次): {str(e)}\n"
+                        "请确认物理浏览器已正常启动且远程调试端口处于监听状态：\n"
+                        "  .\\scripts\\launch_browser.ps1\n"
+                        f"或手动启动命令:\n"
+                        f"  chrome.exe --remote-debugging-port={self.port} --user-data-dir=\"C:\\ChromeDebugProfile\""
+                    )
+                    logger.error(err_msg)
+                    raise ConnectionError(err_msg) from e
 
         return self
 

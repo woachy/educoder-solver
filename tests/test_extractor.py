@@ -283,12 +283,76 @@ class TestBeginEndSplitter:
         assert prefix + target + suffix == code
         assert "    int ans = 42;\n    return ans;\n" == target
 
+    def test_chinese_comment_style(self):
+        """测试高校头歌常见中文注释风格靶心切分"""
+        code = (
+            "# (1) 创建用户与赋权\n"
+            "# ---------- 开始编写你的代码 ----------\n"
+            "CREATE USER 'u1'@'%' IDENTIFIED BY '123456';\n"
+            "GRANT ALL PRIVILEGES ON *.* TO 'u1'@'%';\n"
+            "# ---------- 结束编写你的代码 ----------\n"
+            "-- 补充提交\n"
+        )
+        prefix, target, suffix, has_marker = PracticalExtractor.split_target_code(code)
+        assert has_marker is True
+        assert prefix + target + suffix == code
+        assert "CREATE USER 'u1'@'%'" in target
+        assert "开始编写你的代码" in prefix
+        assert "结束编写你的代码" in suffix
+
+    def test_chinese_start_end_short_style(self):
+        """测试简短中文注释标记风格"""
+        code = (
+            "def solve():\n"
+            "    # 开始\n"
+            "    return True\n"
+            "    # 结束\n"
+        )
+        prefix, target, suffix, has_marker = PracticalExtractor.split_target_code(code)
+        assert has_marker is True
+        assert prefix + target + suffix == code
+        assert "    return True\n" == target
+
     def test_empty_or_none_code(self):
         prefix, target, suffix, has_marker = PracticalExtractor.split_target_code("")
         assert has_marker is False
         assert prefix == ""
         assert target == ""
         assert suffix == ""
+
+
+class TestSqlDialectDetection:
+    """测试 SQL 数据库引擎方言自动识别器"""
+
+    def test_detect_sqlserver_dialect(self):
+        text = "请编写 T-SQL 脚本创建学生信息表"
+        code = "USE master;\nCREATE TABLE student(id INT IDENTITY(1,1), name VARCHAR(50));\nGO"
+        dialect = PracticalExtractor.detect_sql_dialect(text=text, code=code)
+        assert dialect == "sqlserver"
+
+    def test_detect_mysql_dialect(self):
+        text = "在 MySQL 数据库中创建库和用户"
+        code = "CREATE TABLE user(id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(20)) ENGINE=InnoDB;"
+        dialect = PracticalExtractor.detect_sql_dialect(text=text, code=code)
+        assert dialect == "mysql"
+
+    def test_detect_postgresql_dialect(self):
+        text = "使用 PostgreSQL 完成表结构定义"
+        code = "CREATE TABLE logs(log_id SERIAL PRIMARY KEY, msg TEXT);"
+        dialect = PracticalExtractor.detect_sql_dialect(text=text, code=code)
+        assert dialect == "postgresql"
+
+    def test_detect_oracle_dialect(self):
+        text = "使用 Oracle 完成查询操作"
+        code = "SELECT sysdate FROM DUAL;"
+        dialect = PracticalExtractor.detect_sql_dialect(text=text, code=code)
+        assert dialect == "oracle"
+
+    def test_detect_no_sql_dialect(self):
+        text = "编写一个二分查找算法"
+        code = "def binary_search(arr, target): pass"
+        dialect = PracticalExtractor.detect_sql_dialect(text=text, code=code)
+        assert dialect is None
 
 
 class TestQuestionDataSerialization:

@@ -24,6 +24,7 @@ from src.utils.logger import logger
 
 
 TASK_CARD_SELECTORS = [
+    "div[class*='listItem']",
     ".shixun-work-item",
     ".homework-item",
     ".shixun-task-card",
@@ -35,6 +36,10 @@ TASK_CARD_SELECTORS = [
 ]
 
 TASK_ACTION_BUTTON_SELECTORS = [
+    ":has-text('开始学习')",
+    "a:has-text('开始学习')",
+    "button:has-text('开始学习')",
+    "div:has-text('开始学习')",
     "a:has-text('开始实训')",
     "button:has-text('开始实训')",
     "a:has-text('继续挑战')",
@@ -70,7 +75,7 @@ def scan_classroom_tasks(page: Page) -> List[Dict[str, Any]]:
         except Exception:
             continue
 
-    # 2. 如果卡片容器未匹配到，尝试直接定位所有“开始实训/继续挑战”按钮
+    # 2. 如果卡片容器未匹配到，尝试直接定位所有“开始实训/继续挑战/开始学习”按钮
     if not cards:
         for btn_sel in TASK_ACTION_BUTTON_SELECTORS:
             try:
@@ -91,22 +96,34 @@ def scan_classroom_tasks(page: Page) -> List[Dict[str, Any]]:
 
         # 提取标题
         title = f"实训大题 #{idx + 1}"
-        for title_sel in [".task-name", ".title", ".name", "h3", "h4", "a.title"]:
+        for title_sel in ["[class*='titleLeft']", ".task-name", ".title", ".name", "h3", "h4", "a.title"]:
             try:
                 t_el = card.query_selector(title_sel)
                 if t_el:
                     t_text = t_el.inner_text().strip()
                     if t_text:
-                        title = t_text
+                        lines = [line.strip() for line in t_text.splitlines() if line.strip() and line.strip() not in ["提交中", "补交中", "已截止", "已归档"]]
+                        if lines:
+                            title = lines[0]
+                        else:
+                            title = t_text
                         break
             except Exception:
                 continue
 
         # 判定完成状态
+        import re
         is_completed = False
-        if any(k in card_text for k in ["已完成", "100分", "全部通过", "已通关"]):
+        ratio_match = re.search(r'(\d+)\s*/\s*(\d+)', card_text)
+        if ratio_match:
+            done_cnt, total_cnt = int(ratio_match.group(1)), int(ratio_match.group(2))
+            if done_cnt >= total_cnt and total_cnt > 0:
+                is_completed = True
+            else:
+                is_completed = False
+        elif any(k in card_text for k in ["已完成", "100分", "全部通过", "已通关"]):
             is_completed = True
-        elif any(k in card_text for k in ["未完成", "未开始", "进行中", "去完成", "继续挑战", "开始实训"]):
+        elif any(k in card_text for k in ["未完成", "未开始", "进行中", "去完成", "继续挑战", "开始实训", "开始学习"]):
             is_completed = False
 
         # 查找操作按钮
@@ -125,7 +142,7 @@ def scan_classroom_tasks(page: Page) -> List[Dict[str, Any]]:
             try:
                 tag_name = card.evaluate("el => el.tagName.toLowerCase()")
                 if tag_name in ("a", "button") and any(
-                    k in card_text for k in ["开始实训", "继续挑战", "去完成", "进入实训"]
+                    k in card_text for k in ["开始实训", "继续挑战", "去完成", "进入实训", "开始学习"]
                 ):
                     action_btn = card
             except Exception:
@@ -153,6 +170,7 @@ def run_classroom_cruise(
     min_duration: int = 60,
     auto_next: bool = True,
     solver_callback: Optional[Callable[[Page, Any], bool]] = None,
+    interactive: bool = False,
 ) -> Dict[str, Any]:
     """课堂大作业全自动巡航编排执行入口。
 
@@ -162,12 +180,13 @@ def run_classroom_cruise(
         min_duration: 每道关卡控速最小作答时长 (秒，默认 60，传 0 直出)
         auto_next: 评测通过后是否自动流转至下一关 (默认 True)
         solver_callback: 可选的自定义单关求解回调
+        interactive: 是否启用基于 stdio JSON Lines 的 Agent-CLI 双向交互巡航协议
 
     Returns:
         dict: 全流程作业通关汇总报表
     """
     cruise_start = time.time()
-    logger.info(f">>> 启动课堂大作业全自动巡航编排 (最大大题数: {max_tasks}, 关卡控速: {min_duration}s) <<<")
+    logger.info(f">>> 启动课堂大作业全自动巡航编排 (最大大题数: {max_tasks}, 关卡控速: {min_duration}s, 交互模式: {interactive}) <<<")
 
     tasks = scan_classroom_tasks(page)
     total_found = len(tasks)
@@ -231,6 +250,81 @@ def run_classroom_cruise(
 
                 if solver_callback:
                     step_ok = solver_callback(task_page, q_data)
+                elif interactive:
+                    # 交互式协程协议：向 stdout 写入事件，等待 stdin 输入动作
+                    import json
+                    import sys
+
+                    event_payload = {
+                        "event": "question_detected",
+                        "task_title": task_title,
+                        "level_index": level_idx,
+                        "question_type": q_data.type.value if hasattr(q_data.type, "value") else str(q_data.type),
+                        "title": q_data.title,
+                        "description": q_data.description,
+                        "has_target_marker": q_data.metadata.get("has_target_marker", False),
+                        "db_dialect": q_data.metadata.get("db_dialect", None),
+                        "language": q_data.metadata.get("language", ""),
+                        "editor_type": q_data.metadata.get("editor_type", "monaco"),
+                        "question_data": q_data.to_dict(),
+                    }
+                    sys.stdout.write(json.dumps(event_payload, ensure_ascii=False) + "\n")
+                    sys.stdout.flush()
+
+                    # 等待 Agent 输入命令
+                    line = sys.stdin.readline()
+                    if not line:
+                        logger.warning("Agent 交互通道已关闭，退出巡航")
+                        task_success = False
+                        break
+
+                    try:
+                        action_cmd = json.loads(line.strip())
+                    except Exception as e:
+                        logger.error(f"解析 Agent 交互指令失败: {e}")
+                        action_cmd = {"action": "solve", "code": current_code}
+
+                    action_name = action_cmd.get("action", "solve")
+                    if action_name == "skip":
+                        logger.info(f"[{task_title}] 接收到 Agent 跳过指令")
+                        break
+                    elif action_name == "stop":
+                        logger.info(f"[{task_title}] 接收到 Agent 终止指令")
+                        task_success = False
+                        break
+
+                    solve_code = action_cmd.get("code", current_code)
+                    solve_target_only = action_cmd.get("target_only", True)
+                    solve_min_duration = action_cmd.get("min_duration", min_duration)
+
+                    solve_res = run_solve_cycle(
+                        page=task_page,
+                        code=solve_code,
+                        target_only=solve_target_only,
+                        auto_next=auto_next,
+                        min_duration=solve_min_duration,
+                        eval_manager=eval_mgr,
+                        question_data=q_data,
+                    )
+                    step_ok = solve_res.get("passed", False)
+
+                    # 发送评测结果回执事件
+                    eval_event = {
+                        "event": "eval_result",
+                        "task_title": task_title,
+                        "level_index": level_idx,
+                        "passed": step_ok,
+                        "pass_ratio": solve_res.get("pass_ratio", ""),
+                        "diff_hint": solve_res.get("diff_hint", ""),
+                        "circuit_broken": solve_res.get("circuit_broken", False),
+                    }
+                    sys.stdout.write(json.dumps(eval_event, ensure_ascii=False) + "\n")
+                    sys.stdout.flush()
+
+                    if solve_res.get("circuit_broken"):
+                        logger.error(f"[{task_title}] 关卡连续报错触发熔断，停止推进本题")
+                        task_success = False
+                        break
                 else:
                     # 默认使用现有复合流水线评测
                     solve_res = run_solve_cycle(

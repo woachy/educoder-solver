@@ -33,9 +33,12 @@ from src.executor.classroom_orchestrator import run_classroom_cruise
 from src.executor.choice_action import submit_choice_answer
 from src.executor.editor_action import inject_code
 from src.executor.eval_action import EvaluationManager
+from src.executor.modal_sweeper import dismiss_blocking_overlays
 from src.executor.pipeline import run_solve_cycle
+from src.executor.terminal_action import inject_terminal_command, read_terminal_output
 from src.extractor.base import QuestionData, QuestionType
 from src.extractor.detector import extract_question
+from src.utils.delay import random_delay
 from src.utils.logger import logger, print_json_result
 
 console = Console()
@@ -393,13 +396,72 @@ def cmd_submit_answer(args: argparse.Namespace) -> None:
     elif q_type in ("code", "practical"):
         fake_args = argparse.Namespace(code=data_content, file=None, full=args.full, json=json_mode)
         cmd_inject_code(fake_args)
+    elif q_type in ("terminal", "cmd", "shell"):
+        fake_args = argparse.Namespace(cmd=data_content, no_enter=False, read=False, eval=False, timeout=60, json=json_mode)
+        cmd_submit_terminal(fake_args)
     else:
-        err = {"status": "error", "message": f"未知题目类型: {q_type}，支持 [choice|blank|code]"}
+        err = {"status": "error", "message": f"未知题目类型: {q_type}，支持 [choice|blank|code|terminal]"}
         if json_mode:
             print_json_result(err, exit_code=1)
         else:
             console.print(f"[bold red]错误：{err['message']}[/bold red]")
             sys.exit(1)
+
+
+def cmd_submit_terminal(args: argparse.Namespace) -> None:
+    """向 Web 终端 (xterm.js) 安全注入并执行命令"""
+    json_mode = args.json or config.log.json_mode
+    command = args.cmd
+    execute_enter = not getattr(args, "no_enter", False)
+    should_read = getattr(args, "read", False)
+    should_eval = getattr(args, "eval", False)
+    timeout = getattr(args, "timeout", 60) or 60
+
+    try:
+        with BrowserSession() as session:
+            page = session.get_target_page(config.browser.target_domain)
+            dismiss_blocking_overlays(page)
+
+            ok = inject_terminal_command(page, command, execute_enter=execute_enter)
+            output_text = ""
+            if should_read or not ok:
+                random_delay(0.5, 1.0)
+                output_text = read_terminal_output(page)
+
+            eval_res = None
+            if ok and should_eval:
+                eval_mgr = EvaluationManager()
+                eval_res = eval_mgr.trigger_and_wait_eval(page, timeout_seconds=timeout)
+
+            result_dict = {
+                "status": "success" if ok else "failed",
+                "injected": ok,
+                "command": command,
+                "executed_enter": execute_enter,
+                "terminal_output": output_text,
+            }
+            if eval_res:
+                result_dict["eval_result"] = eval_res
+                result_dict["passed"] = eval_res.get("passed", False)
+
+            if json_mode:
+                print_json_result(result_dict, exit_code=None if ok else 1)
+            else:
+                color = "green" if ok else "red"
+                panel_text = [
+                    f"[{color}]命令注入{'成功' if ok else '失败'}[/{color}]",
+                    f"注入指令: [bold cyan]{command}[/bold cyan]",
+                    f"回车执行: {'是' if execute_enter else '否'}",
+                ]
+                if output_text:
+                    panel_text.append(f"\n[yellow]终端屏幕内容:[/yellow]\n{output_text}")
+                if eval_res:
+                    eval_color = "green" if eval_res.get("passed") else "red"
+                    panel_text.append(f"\n[{eval_color}]评测结果: {eval_res.get('message')}[/{eval_color}]")
+
+                console.print(Panel("\n".join(panel_text), title="Web 终端执行回执 (Terminal Action)", border_style=color))
+    except Exception as e:
+        _handle_connection_error(e, json_mode)
 
 
 def cmd_solve_cycle(args: argparse.Namespace) -> None:
@@ -483,6 +545,7 @@ def cmd_run_classroom_homework(args: argparse.Namespace) -> None:
     max_tasks = getattr(args, "max_tasks", 10) or 10
     min_duration = getattr(args, "min_duration", 60) if getattr(args, "min_duration", None) is not None else 60
     auto_next = getattr(args, "auto_next", True)
+    interactive = getattr(args, "interactive", False)
 
     try:
         with BrowserSession() as session:
@@ -492,6 +555,7 @@ def cmd_run_classroom_homework(args: argparse.Namespace) -> None:
                 max_tasks=max_tasks,
                 min_duration=min_duration,
                 auto_next=auto_next,
+                interactive=interactive,
             )
 
             if json_mode:
@@ -578,7 +642,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 7. submit-answer (综合命令，兼容 AGENTS.md 规范)
     p_answer = subparsers.add_parser("submit-answer", help="综合答题接口 (按题型路由)")
-    p_answer.add_argument("--type", required=True, choices=["choice", "blank", "code", "practical"], help="题型")
+    p_answer.add_argument("--type", required=True, choices=["choice", "blank", "code", "practical", "terminal"], help="题型")
     p_answer.add_argument("--data", required=True, help="答案数据 (文本、JSON 或文件路径)")
     p_answer.add_argument("--full", action="store_true", help="代码题是否全量覆盖")
     p_answer.add_argument("--json", action="store_true", help="结构化 JSON 输出")
@@ -594,11 +658,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_cycle.add_argument("--min-duration", type=int, default=60, help="单题防秒刷最小作答总时长 (秒，默认 60，设为 0 直出)")
     p_cycle.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
-    # 9. run-classroom-homework (课堂大作业全自动巡航编排)
+    # 9. submit-terminal (Web 终端执行)
+    p_term = subparsers.add_parser("submit-terminal", help="向 Web 终端 (xterm.js) 安全注入并执行 Shell/SQL 指令")
+    p_term.add_argument("--cmd", "-c", required=True, help="待注入的终端命令文本")
+    p_term.add_argument("--no-enter", action="store_true", help="不自动发送回车执行")
+    p_term.add_argument("--read", action="store_true", help="执行后读取屏幕输出")
+    p_term.add_argument("--eval", action="store_true", help="执行后触发关卡评测监听")
+    p_term.add_argument("--timeout", type=int, default=60, help="评测等待超时 (秒，默认 60)")
+    p_term.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
+    # 10. run-classroom-homework (课堂大作业全自动巡航编排)
     p_cruise = subparsers.add_parser("run-classroom-homework", help="全自动巡航编排跑完课堂实训大作业")
     p_cruise.add_argument("--max-tasks", type=int, default=10, help="最大连续推进大题数量 (默认 10)")
     p_cruise.add_argument("--min-duration", type=int, default=60, help="单题防秒刷最小作答总时长 (秒，默认 60，设为 0 直出)")
     p_cruise.add_argument("--auto-next", action="store_true", default=True, help="关卡通过后自动流转下一关 (默认 True)")
+    p_cruise.add_argument("--interactive", "-i", action="store_true", help="启用基于 stdio JSON Lines 的 Agent-CLI 双向交互巡航协议")
     p_cruise.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
     return parser
@@ -626,6 +700,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         "inject-code": cmd_inject_code,
         "trigger-eval": cmd_trigger_eval,
         "submit-answer": cmd_submit_answer,
+        "submit-terminal": cmd_submit_terminal,
         "solve-cycle": cmd_solve_cycle,
         "run-classroom-homework": cmd_run_classroom_homework,
     }

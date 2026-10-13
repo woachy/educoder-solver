@@ -9,7 +9,7 @@
 
 import socket
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 import pytest
 
 from src.browser.manager import (
@@ -73,6 +73,58 @@ class TestBrowserSession:
         assert "59124" in err_msg
         assert "launch_browser.ps1" in err_msg
         assert "--remote-debugging-port" in err_msg
+
+    @patch("src.browser.manager.check_cdp_available", return_value=True)
+    @patch("src.browser.manager.time.sleep")
+    @patch("src.browser.manager.sync_playwright")
+    def test_session_retry_connect_success(self, mock_playwright_cm, mock_sleep, mock_check_cdp):
+        """测试首轮 connect_over_cdp 抛异常、第二轮重试成功的自愈场景"""
+        mock_browser = MagicMock()
+        mock_playwright = MagicMock()
+        # 首轮抛异常，第二轮返回 mock_browser
+        mock_playwright.chromium.connect_over_cdp.side_effect = [
+            RuntimeError("Connection refused by CDP endpoint"),
+            mock_browser,
+        ]
+        mock_playwright_cm.return_value.start.return_value = mock_playwright
+
+        with BrowserSession(port=9222, max_retries=3, retry_delay=1.0) as session:
+            assert session.browser == mock_browser
+
+        # 验证调用了 2 次 connect_over_cdp
+        assert mock_playwright.chromium.connect_over_cdp.call_count == 2
+        # 验证触发了 1 次退避等待，间隔为 retry_delay * 1 = 1.0s
+        mock_sleep.assert_called_once_with(1.0)
+
+    @patch("src.browser.manager.check_cdp_available", return_value=True)
+    @patch("src.browser.manager.time.sleep")
+    @patch("src.browser.manager.sync_playwright")
+    def test_session_retry_exceeded_raises_connection_error(self, mock_playwright_cm, mock_sleep, mock_check_cdp):
+        """测试重试超过 max_retries 后正确抛出 ConnectionError 并清理资源"""
+        mock_playwright = MagicMock()
+        mock_playwright.chromium.connect_over_cdp.side_effect = RuntimeError("CDP socket closed")
+        mock_playwright_cm.return_value.start.return_value = mock_playwright
+
+        session = BrowserSession(port=9222, max_retries=3, retry_delay=0.5)
+        with pytest.raises(ConnectionError) as exc_info:
+            with session:
+                pass
+
+        err_msg = str(exc_info.value)
+        assert "连接 CDP 失败" in err_msg
+        assert "3" in err_msg
+        assert "launch_browser.ps1" in err_msg
+        assert "--remote-debugging-port" in err_msg
+
+        # 验证尝试了 3 次
+        assert mock_playwright.chromium.connect_over_cdp.call_count == 3
+        # 验证前两次失败进行了退避重试: 0.5 * 1 = 0.5s, 0.5 * 2 = 1.0s
+        assert mock_sleep.call_count == 2
+        mock_sleep.assert_has_calls([call(0.5), call(1.0)])
+        # 验证资源被清理: playwright.stop() 已被调用，实例引用被释放
+        mock_playwright.stop.assert_called_once()
+        assert session.playwright is None
+        assert session.browser is None
 
     @patch("src.browser.manager.check_cdp_available", return_value=True)
     @patch("src.browser.manager.sync_playwright")
