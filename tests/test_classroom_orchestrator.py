@@ -9,6 +9,7 @@ from src.executor.classroom_orchestrator import (
     run_classroom_cruise,
     scan_classroom_tasks,
     _read_stdin_with_timeout,
+    penetrate_detail_springboard,
 )
 
 
@@ -327,4 +328,113 @@ def test_run_classroom_cruise_stdin_timeout():
         assert report["tasks_failed"] == 1
         stdout_lines = [line.strip() for line in fake_stdout.getvalue().splitlines() if line.strip()]
         assert any("timeout" in l for l in stdout_lines)
+
+
+def test_open_classroom_task_penetrate_detail_springboard_url():
+    """测试打开大题后命中实训跳板详情页 (/detail)，自动穿透点击进入真正 IDE 页面"""
+    mock_page = MagicMock()
+    mock_task_btn = MagicMock()
+    fake_tasks = [
+        {"index": 0, "title": "实训大题-详情页跳板", "is_completed": False, "button": mock_task_btn},
+    ]
+
+    # 跳板详情页
+    mock_springboard_page = MagicMock()
+    mock_springboard_page.url = "https://www.educoder.net/shixuns/abc123xyz/detail?tabs=0"
+    mock_inner_btn = MagicMock()
+    mock_inner_btn.is_visible.return_value = True
+
+    # 真正的 IDE 关卡页
+    mock_real_ide_page = MagicMock()
+    mock_real_ide_page.url = "https://www.educoder.net/tasks/abc123xyz"
+
+    def springboard_qs(sel):
+        if "继续挑战" in sel or "开始实训" in sel:
+            return mock_inner_btn
+        return None
+
+    mock_springboard_page.query_selector.side_effect = springboard_qs
+
+    mock_context = MagicMock()
+    mock_page.context = mock_context
+
+    # 第一次 expect_page 打开跳板详情页，第二次 expect_page 穿透到真正 IDE 关卡页
+    mock_page_info_1 = MagicMock(value=mock_springboard_page)
+    mock_page_info_2 = MagicMock(value=mock_real_ide_page)
+    mock_context.expect_page.side_effect = [
+        MagicMock(__enter__=MagicMock(return_value=mock_page_info_1), __exit__=MagicMock(return_value=None)),
+        MagicMock(__enter__=MagicMock(return_value=mock_page_info_2), __exit__=MagicMock(return_value=None)),
+    ]
+
+    mock_q = MagicMock()
+    mock_q.title = "第1关：跳板穿透验证"
+    mock_q.type.value = "practical"
+    mock_q.metadata = {"language": "python", "has_target_marker": True}
+
+    with patch("src.executor.classroom_orchestrator.scan_classroom_tasks", return_value=fake_tasks), \
+         patch("src.executor.classroom_orchestrator.dismiss_blocking_overlays"), \
+         patch("src.executor.classroom_orchestrator.random_delay"), \
+         patch("src.executor.classroom_orchestrator.extract_question", return_value=mock_q):
+
+        res = open_classroom_task(mock_page, index=0)
+
+        assert res["status"] == "success"
+        assert res["task_url"] == "https://www.educoder.net/tasks/abc123xyz"
+        assert res["level_preview"]["title"] == "第1关：跳板穿透验证"
+
+        # 验证点击了卡片按钮与内层挑战按钮
+        mock_task_btn.click.assert_called_once()
+        mock_inner_btn.click.assert_called_once()
+        # 验证旧跳板详情页被安全关闭
+        mock_springboard_page.close.assert_called_once()
+        # 验证新 IDE 页面被激活聚焦
+        mock_real_ide_page.bring_to_front.assert_called_once()
+
+
+def test_penetrate_detail_springboard_no_monaco():
+    """测试页面缺乏 Monaco 编辑器且存在内层按钮时自动穿透"""
+    mock_page = MagicMock()
+    mock_page.url = "https://www.educoder.net/shixuns/test1"
+    # evaluate 检测 monaco 返回 False
+    mock_page.evaluate.return_value = False
+
+    mock_inner_btn = MagicMock()
+    mock_inner_btn.is_visible.return_value = True
+
+    def page_qs(sel):
+        if "monaco" in sel:
+            return None
+        if "开始实训" in sel:
+            return mock_inner_btn
+        return None
+
+    mock_page.query_selector.side_effect = page_qs
+
+    mock_new_tab = MagicMock()
+    mock_new_tab.url = "https://www.educoder.net/tasks/test1"
+
+    mock_context = MagicMock()
+    mock_context.expect_page.return_value.__enter__.return_value = MagicMock(value=mock_new_tab)
+
+    with patch("src.executor.classroom_orchestrator.dismiss_blocking_overlays"), \
+         patch("src.executor.classroom_orchestrator.random_delay"):
+        result_page = penetrate_detail_springboard(mock_page, context=mock_context)
+
+        assert result_page == mock_new_tab
+        mock_inner_btn.click.assert_called_once()
+        mock_page.close.assert_called_once()
+
+
+def test_penetrate_detail_springboard_not_triggered_for_real_ide():
+    """测试如果已经是 Monaco 关卡 IDE 界面且 URL 无 /detail，则不触发穿透"""
+    mock_page = MagicMock()
+    mock_page.url = "https://www.educoder.net/tasks/real_ide"
+    mock_page.evaluate.return_value = True  # has monaco
+
+    mock_context = MagicMock()
+    result_page = penetrate_detail_springboard(mock_page, context=mock_context)
+
+    assert result_page == mock_page
+    mock_context.expect_page.assert_not_called()
+
 

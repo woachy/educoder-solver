@@ -38,6 +38,7 @@ from src.executor.choice_action import submit_choice_answer
 from src.executor.editor_action import inject_code
 from src.executor.eval_action import EvaluationManager
 from src.executor.modal_sweeper import dismiss_blocking_overlays
+from src.executor.pacing import pacing_controller
 from src.executor.pipeline import run_solve_cycle
 from src.executor.terminal_action import inject_terminal_command, read_terminal_output
 from src.extractor.base import QuestionData, QuestionType
@@ -151,6 +152,14 @@ def cmd_dump_question(args: argparse.Namespace) -> None:
             page = session.get_target_page(config.browser.target_domain)
             q_data: QuestionData = extract_question(page, force_type=force_type)
             result_dict = q_data.to_dict()
+
+            # 智能打卡: 当识别到实训题/代码题时，若当前关卡尚未打卡，自动打卡记录时间戳
+            if q_data.type == QuestionType.PRACTICAL or getattr(q_data, "practical_details", None) is not None:
+                page_url = getattr(page, "url", None)
+                if page_url:
+                    page_url_str = str(page_url)
+                    if pacing_controller.get_elapsed_time(page_url_str) == 0.0:
+                        pacing_controller.start_task(page_url_str)
 
             if args.output:
                 out_path = Path(args.output).resolve()
@@ -502,6 +511,8 @@ def cmd_solve_cycle(args: argparse.Namespace) -> None:
     try:
         with BrowserSession() as session:
             page = session.get_target_page(config.browser.target_domain)
+            page_url = getattr(page, "url", None)
+            task_id = str(page_url) if page_url else None
             result = run_solve_cycle(
                 page=page,
                 code=code_content,
@@ -509,6 +520,7 @@ def cmd_solve_cycle(args: argparse.Namespace) -> None:
                 auto_next=auto_next,
                 timeout=timeout,
                 min_duration=min_duration,
+                task_id=task_id,
             )
 
             if json_mode:
@@ -596,6 +608,12 @@ def cmd_open_task(args: argparse.Namespace) -> None:
         with BrowserSession() as session:
             page = session.get_target_page(keyword)
             res = open_classroom_task(page, index=index)
+
+            # 开启大题成功后，调用 pacing_controller.start_task(task_url) 打卡
+            if res.get("status") == "success":
+                task_url = res.get("task_url")
+                if task_url:
+                    pacing_controller.start_task(str(task_url))
 
             if json_mode:
                 print_json_result(res)

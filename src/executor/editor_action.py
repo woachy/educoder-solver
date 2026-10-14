@@ -99,22 +99,27 @@ def get_current_editor_code(page: Page) -> str:
     detect_js = """
     () => {
         try {
-            // 1. 全局 window.monaco
-            if (window.monaco && window.monaco.editor) {
-                const models = window.monaco.editor.getModels();
+            // 1. 全局 window.monaco || window.Monaco
+            const m = window.monaco || window.Monaco;
+            if (m && m.editor) {
+                const models = m.editor.getModels();
                 if (models && models.length > 0) return models[0].getValue();
             }
             // 2. React / Vue Fiber 挂载探查
-            const editorEls = document.querySelectorAll('.monaco-editor');
+            const editorEls = document.querySelectorAll('.monaco-editor, .my-monaco-editor');
             for (const el of editorEls) {
                 const fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
                 if (fiberKey) {
                     let curr = el[fiberKey];
                     while (curr) {
-                        const ed = (curr.memoizedProps && curr.memoizedProps.editor) || 
-                                   (curr.memoizedState && curr.memoizedState.editor);
+                        const props = curr.memoizedProps || {};
+                        const state = curr.memoizedState || {};
+                        const ed = props.monacoEditor || props.editor || state.monacoEditor || state.editor;
                         if (ed && typeof ed.getValue === 'function') {
                             return ed.getValue();
+                        }
+                        if (ed && typeof ed.getModel === 'function' && ed.getModel()) {
+                            return ed.getModel().getValue();
                         }
                         curr = curr.return;
                     }
@@ -153,7 +158,11 @@ def get_current_editor_code(page: Page) -> str:
         pass
 
     try:
-        view_lines = page.query_selector_all(".monaco-editor .view-lines .view-line")
+        view_lines = page.query_selector_all(
+            ".monaco-editor .view-lines .view-line, .my-monaco-editor .view-lines .view-line"
+        )
+        if not view_lines:
+            view_lines = page.query_selector_all(".view-lines .view-line")
         if view_lines:
             lines = [l.inner_text() for l in view_lines]
             return "\n".join(lines)
@@ -224,6 +233,8 @@ def inject_code(
             - method_used (str): 使用的注入方法 ('monaco_api', 'ace_api', 'keyboard_fallback', 'textarea_value')
             - full_code (str): 最终注入到编辑器的完整代码
             - is_target_assembled (bool): 是否进行了靶心拼接
+            - saved (bool): 是否已触发保存 (onSave 或 Control+S 兜底)
+            - commit_id (str): 若成功触发 onSave 提取到的后端 Git Commit ID
             - message (str): 操作说明
     """
     if new_code is None:
@@ -232,8 +243,11 @@ def inject_code(
             "backup_path": "",
             "method_used": "none",
             "full_code": "",
+            "target_only": target_only,
             "is_target_assembled": False,
             "fallback_to_full": False,
+            "saved": False,
+            "commit_id": "",
             "message": "待注入代码不能为空",
         }
 
@@ -278,39 +292,107 @@ def inject_code(
     # 4. 执行分级安全注入
     method_used = "none"
     success = False
+    saved = False
+    commit_id = ""
 
     # 级别 1: Monaco Editor 原生 API & Fiber 深度穿透 (跨所有 frames)
     frames = _get_all_frames(page)
     monaco_js = """
-    (val) => {
+    async (val) => {
         try {
-            // 1. 全局 Monaco 实例
-            if (window.monaco && window.monaco.editor) {
-                const models = window.monaco.editor.getModels();
-                if (models && models.length > 0) {
-                    models[0].setValue(val);
-                    return true;
-                }
-            }
-            // 2. React / Vue Fiber 挂载探查
-            const editorEls = document.querySelectorAll('.monaco-editor');
+            // 1. React / Vue Fiber 挂载探查
+            const editorEls = document.querySelectorAll('.monaco-editor, .my-monaco-editor');
             for (const el of editorEls) {
                 const fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
                 if (fiberKey) {
                     let curr = el[fiberKey];
                     while (curr) {
-                        const ed = (curr.memoizedProps && curr.memoizedProps.editor) || 
-                                   (curr.memoizedState && curr.memoizedState.editor);
-                        if (ed && typeof ed.setValue === 'function') {
-                            ed.setValue(val);
-                            return true;
+                        const props = curr.memoizedProps || {};
+                        const state = curr.memoizedState || {};
+                        const ed = props.monacoEditor || props.editor || state.monacoEditor || state.editor;
+                        if (ed) {
+                            let injected = false;
+                            if (typeof ed.setValue === 'function') {
+                                ed.setValue(val);
+                                injected = true;
+                            } else if (typeof ed.getModel === 'function' && ed.getModel()) {
+                                ed.getModel().setValue(val);
+                                injected = true;
+                            } else if (ed.editor && typeof ed.editor.setValue === 'function') {
+                                ed.editor.setValue(val);
+                                injected = true;
+                            }
+
+                            // 兜底结合全局 Monaco 实例赋值
+                            if (!injected) {
+                                const m = window.monaco || window.Monaco;
+                                if (m && m.editor) {
+                                    const models = m.editor.getModels();
+                                    if (models && models.length > 0) {
+                                        models[0].setValue(val);
+                                        injected = true;
+                                    }
+                                }
+                            }
+
+                            // 显式调用 onChange(val) 通知 React 组件状态更新
+                            if (typeof ed.onChange === 'function') {
+                                try { ed.onChange(val); } catch (e) {}
+                            } else if (typeof props.onChange === 'function') {
+                                try { props.onChange(val); } catch (e) {}
+                            }
+
+                            // 显式调用 onSave(1) 触发向后端提交 Git Commit
+                            let hasSaved = false;
+                            let cid = "";
+                            let saveRes = null;
+                            if (typeof ed.onSave === 'function') {
+                                try {
+                                    saveRes = ed.onSave(1);
+                                    hasSaved = true;
+                                } catch (e) {}
+                            } else if (typeof props.onSave === 'function') {
+                                try {
+                                    saveRes = props.onSave(1);
+                                    hasSaved = true;
+                                } catch (e) {}
+                            }
+
+                            if (saveRes && typeof saveRes.then === 'function') {
+                                try { saveRes = await saveRes; } catch (e) {}
+                            }
+                            if (saveRes && typeof saveRes === 'object') {
+                                cid = saveRes.commitID || saveRes.commit_id ||
+                                      (saveRes.data && (saveRes.data.commitID || saveRes.data.commit_id)) || "";
+                            }
+                            if (!cid) {
+                                cid = ed.commitID || ed.commit_id || props.commitID || props.commit_id || "";
+                            }
+
+                            if (injected) {
+                                return {
+                                    injected: true,
+                                    saved: hasSaved,
+                                    commit_id: cid ? String(cid) : ""
+                                };
+                            }
                         }
                         curr = curr.return;
                     }
                 }
                 if (el.__vue__ && el.__vue__.editor && typeof el.__vue__.editor.setValue === 'function') {
                     el.__vue__.editor.setValue(val);
-                    return true;
+                    return { injected: true, saved: false, commit_id: "" };
+                }
+            }
+
+            // 2. 全局 window.monaco || window.Monaco 实例
+            const m = window.monaco || window.Monaco;
+            if (m && m.editor) {
+                const models = m.editor.getModels();
+                if (models && models.length > 0) {
+                    models[0].setValue(val);
+                    return { injected: true, saved: false, commit_id: "" };
                 }
             }
         } catch (e) {}
@@ -320,11 +402,20 @@ def inject_code(
     for f in frames:
         if hasattr(f, "evaluate") and callable(f.evaluate):
             try:
-                injected = f.evaluate(monaco_js, full_code)
-                if injected:
+                injected_res = f.evaluate(monaco_js, full_code)
+                if isinstance(injected_res, dict) and injected_res.get("injected"):
                     method_used = "monaco_api"
                     success = True
-                    logger.success("通过 Monaco 原生/Fiber 内存 API 成功注入代码")
+                    saved = bool(injected_res.get("saved", False))
+                    commit_id = str(injected_res.get("commit_id") or "")
+                    logger.success(
+                        f"通过 Monaco 原生/Fiber 内存 API 成功注入代码 (saved: {saved}, commit_id: {commit_id})"
+                    )
+                    break
+                elif injected_res is True:
+                    method_used = "monaco_api"
+                    success = True
+                    logger.success("通过 Monaco 原生 API 成功注入代码")
                     break
             except Exception as e:
                 logger.debug(f"Frame Monaco API 注入异常: {e}")
@@ -364,6 +455,7 @@ def inject_code(
             logger.info("正在执行键盘模拟全选覆盖兜底方案...")
             editor_selectors = [
                 ".monaco-editor",
+                ".my-monaco-editor",
                 ".ace_editor",
                 ".code-editor",
                 "textarea.editor",
@@ -421,6 +513,18 @@ def inject_code(
         except Exception as e:
             logger.debug(f"Textarea 赋值异常: {e}")
 
+    # 5. 若未触发 onSave（例如纯 Monaco 模式），兜底使用 Control+S 并微延迟保存
+    if success and not saved:
+        try:
+            if hasattr(page, "keyboard") and hasattr(page.keyboard, "press"):
+                logger.info("未触发 onSave，执行 Control+S 键盘快捷键兜底保存...")
+                page.keyboard.press("Control+S")
+                random_delay(0.2, 0.5)
+                saved = True
+                logger.success("已通过 Control+S 兜底触发保存")
+        except Exception as se:
+            logger.debug(f"快捷键兜底保存异常: {se}")
+
     result = {
         "success": success,
         "backup_path": backup_path,
@@ -429,8 +533,10 @@ def inject_code(
         "target_only": target_only,
         "is_target_assembled": is_assembled,
         "fallback_to_full": fallback_to_full,
+        "saved": saved,
+        "commit_id": commit_id,
         "message": (
-            f"代码安全注入成功 (方法: {method_used}, 备份: {backup_path})"
+            f"代码安全注入成功 (方法: {method_used}, 保存: {saved}, commit_id: {commit_id}, 备份: {backup_path})"
             if success
             else f"代码注入失败，但原代码已安全备份至 {backup_path}"
         ),

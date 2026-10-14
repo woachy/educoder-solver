@@ -54,6 +54,16 @@ def run_solve_cycle(
 
     eval_mgr = eval_manager or EvaluationManager()
 
+    # 获取有效任务 ID (若未显式指定，默认取 page.url)
+    effective_task_id = task_id
+    if effective_task_id is None and page:
+        try:
+            url_val = getattr(page, "url", None)
+            if url_val is not None:
+                effective_task_id = str(url_val) if not isinstance(url_val, str) else url_val
+        except Exception:
+            effective_task_id = None
+
     # 1. 清理可能遮挡编辑器或评测按钮的各类弹窗与遮罩
     overlays_dismissed = dismiss_blocking_overlays(page)
 
@@ -82,7 +92,11 @@ def run_solve_cycle(
             "next_level_triggered": False,
             "overlays_dismissed": overlays_dismissed,
             "elapsed_seconds": elapsed,
-            "injection": inject_res,
+            "injection": {
+                **inject_res,
+                "saved": inject_res.get("saved", False),
+                "commit_id": inject_res.get("commit_id", ""),
+            },
             "message": err_msg,
         }
 
@@ -91,7 +105,7 @@ def run_solve_cycle(
         pacing_controller.wait_thinking_pacing(
             page=page,
             min_duration=min_duration,
-            task_id=task_id,
+            task_id=effective_task_id,
         )
 
     # 4. 触发评测并两阶段监听回执
@@ -100,7 +114,11 @@ def run_solve_cycle(
     passed = eval_res.get("passed", False)
     next_level_triggered = False
 
-    # 4. 若评测全部通过且开启了 auto_next，自动点击下一关
+    # 若评测全部通过，清理当前关卡的控速打卡缓存
+    if passed:
+        pacing_controller.clear_task(effective_task_id)
+
+    # 5. 若评测全部通过且开启了 auto_next，自动点击下一关
     if passed and auto_next:
         logger.info("评测全部通过，正在自动流转下一关...")
         next_level_triggered = eval_mgr.trigger_next_level(page)
@@ -126,6 +144,8 @@ def run_solve_cycle(
             "method_used": inject_res.get("method_used", ""),
             "backup_path": inject_res.get("backup_path", ""),
             "is_target_assembled": inject_res.get("is_target_assembled", False),
+            "saved": inject_res.get("saved", False),
+            "commit_id": inject_res.get("commit_id", ""),
         },
         "message": eval_res.get("message", ""),
     }

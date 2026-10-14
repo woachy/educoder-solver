@@ -50,6 +50,138 @@ TASK_ACTION_BUTTON_SELECTORS = [
     "button:has-text('进入实训')",
 ]
 
+INNER_CHALLENGE_BUTTON_SELECTORS = [
+    "a:has-text('继续挑战')",
+    "button:has-text('继续挑战')",
+    "div:has-text('继续挑战')",
+    "a:has-text('开始实训')",
+    "button:has-text('开始实训')",
+    "div:has-text('开始实训')",
+    "a:has-text('进入实训')",
+    "button:has-text('进入实训')",
+    "div:has-text('进入实训')",
+    "a:has-text('立即实训')",
+    "button:has-text('立即实训')",
+    "div:has-text('立即实训')",
+    "a:has-text('开始挑战')",
+    "button:has-text('开始挑战')",
+    "a:has-text('去完成')",
+    "button:has-text('去完成')",
+    "a:has-text('开始学习')",
+    "button:has-text('开始学习')",
+    ":has-text('继续挑战')",
+    ":has-text('开始实训')",
+    ":has-text('进入实训')",
+    ":has-text('开始挑战')",
+]
+
+
+def penetrate_detail_springboard(page: Page, context: Any = None) -> Page:
+    """检测并自动穿透实训跳板详情页 (/detail)，点击内层挑战按钮进入真正关卡 IDE 页面。
+
+    某些课堂作业点击卡片后，打开的是实训介绍/大纲跳板详情页（URL 包含 /detail，或页面没有 Monaco 编辑器，
+    但存在“开始实训”/“继续挑战”/“进入实训”等内层按钮）。本函数自动定位并点击该按钮，切换至真正的第 1 关 IDE。
+
+    Args:
+        page: 当前打开的 Page 实例
+        context: 浏览器上下文实例 (用于捕获可能弹出的新标签页)
+
+    Returns:
+        Page: 真正进入的关卡 IDE Page 实例
+    """
+    if not page:
+        return page
+
+    current_url = getattr(page, "url", "") or ""
+    is_detail_url = "/detail" in current_url.lower()
+
+    has_monaco = False
+    if hasattr(page, "evaluate") and callable(page.evaluate):
+        try:
+            ev_res = page.evaluate(
+                "() => !!(((window.monaco || window.Monaco) && (window.monaco || window.Monaco).editor) || document.querySelector('.monaco-editor, .my-monaco-editor'))"
+            )
+            if ev_res:
+                has_monaco = True
+        except Exception:
+            pass
+
+    if not has_monaco and hasattr(page, "query_selector"):
+        try:
+            if page.query_selector(".monaco-editor, .my-monaco-editor"):
+                has_monaco = True
+        except Exception:
+            pass
+
+    # 若已是真正的 IDE 界面且 URL 不含 /detail，无需穿透
+    if not is_detail_url and has_monaco:
+        return page
+
+    # 寻找内层挑战按钮
+    inner_btn = None
+    for sel in INNER_CHALLENGE_BUTTON_SELECTORS:
+        try:
+            btn = page.query_selector(sel)
+            if btn:
+                if hasattr(btn, "is_visible") and callable(btn.is_visible):
+                    if btn.is_visible():
+                        inner_btn = btn
+                        break
+                else:
+                    inner_btn = btn
+                    break
+        except Exception:
+            continue
+
+    # 若未找到内层按钮，无法穿透，直接返回
+    if not inner_btn:
+        return page
+
+    logger.info(f"检测到实训跳板详情页 ({current_url})，自动穿透点击进入真正关卡 IDE...")
+
+    new_tab = None
+    if context and hasattr(context, "expect_page") and callable(context.expect_page):
+        try:
+            with context.expect_page(timeout=5000) as pinfo:
+                inner_btn.click()
+            new_tab = pinfo.value
+            logger.info(f"详情页穿透捕获新关卡标签页: {getattr(new_tab, 'url', '')}")
+            if hasattr(new_tab, "wait_for_load_state"):
+                new_tab.wait_for_load_state("domcontentloaded")
+        except Exception as pe:
+            logger.debug(f"expect_page 穿透超时或为同页面跳转: {pe}")
+    else:
+        try:
+            inner_btn.click()
+        except Exception as e:
+            logger.debug(f"点击详情页挑战按钮异常: {e}")
+
+    if not new_tab and context and hasattr(context, "pages") and isinstance(context.pages, list):
+        if len(context.pages) > 1 and context.pages[-1] != page:
+            new_tab = context.pages[-1]
+
+    if new_tab and new_tab != page:
+        try:
+            page.close()
+        except Exception:
+            pass
+        page = new_tab
+    else:
+        if hasattr(page, "wait_for_load_state"):
+            try:
+                page.wait_for_load_state("domcontentloaded")
+            except Exception:
+                pass
+
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+
+    random_delay(0.5, 1.0)
+    dismiss_blocking_overlays(page)
+    return page
+
 
 def scan_classroom_tasks(page: Page) -> List[Dict[str, Any]]:
     """扫描课堂实训作业列表页，提取所有大题卡片与状态。
@@ -240,6 +372,9 @@ def open_classroom_task(page: Page, index: Optional[int] = None) -> Dict[str, An
     random_delay(1.0, 2.0)
     dismiss_blocking_overlays(task_page)
 
+    # 自动穿透跳板详情页 (/detail 或无 Monaco 页面)
+    task_page = penetrate_detail_springboard(task_page, context)
+
     # 预感知第一关
     q_data = extract_question(task_page)
     preview = {
@@ -366,6 +501,9 @@ def run_classroom_cruise(
 
         if not task_page:
             task_page = page
+
+        # 自动穿透跳板详情页
+        task_page = penetrate_detail_springboard(task_page, context)
 
         # 2. 在任务 Tab 内流转关卡
         level_count = 0

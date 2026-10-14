@@ -265,6 +265,52 @@ class TestEditorAction:
             mock_page.keyboard.press.assert_has_calls([call("Control+A"), call("Backspace")])
             mock_page.keyboard.insert_text.assert_called_with("new_code_content")
 
+    def test_inject_code_fiber_onsave_with_commit_id(self, tmp_path):
+        """测试 React Fiber onSave 成功调用并提取 commit_id，无需 Control+S 兜底"""
+        mock_page = MagicMock()
+        mock_page.evaluate.side_effect = [
+            "def foo():\n    pass",  # get current code
+            {
+                "injected": True,
+                "saved": True,
+                "commit_id": "commit_abc123456",
+            },  # monaco evaluate returning fiber onSave result
+        ]
+
+        with patch("src.executor.editor_action.BACKUP_DIR", tmp_path), \
+             patch("src.executor.editor_action.random_delay"):
+            result = inject_code(mock_page, "def foo():\n    return 42", target_only=False)
+
+            assert result["success"] is True
+            assert result["method_used"] == "monaco_api"
+            assert result["saved"] is True
+            assert result["commit_id"] == "commit_abc123456"
+            # onSave 已经成功，不应触发 Control+S 兜底
+            mock_page.keyboard.press.assert_not_called()
+
+    def test_inject_code_fallback_to_ctrl_s_when_not_saved(self, tmp_path):
+        """测试纯 Monaco 模式下未触发 onSave 时自动执行 Control+S 兜底保存"""
+        mock_page = MagicMock()
+        mock_page.evaluate.side_effect = [
+            "def foo():\n    pass",  # get current code
+            {
+                "injected": True,
+                "saved": False,
+                "commit_id": "",
+            },  # monaco evaluate without onSave
+        ]
+
+        with patch("src.executor.editor_action.BACKUP_DIR", tmp_path), \
+             patch("src.executor.editor_action.random_delay"):
+            result = inject_code(mock_page, "def foo():\n    return 42", target_only=False)
+
+            assert result["success"] is True
+            assert result["method_used"] == "monaco_api"
+            assert result["saved"] is True
+            assert result["commit_id"] == ""
+            # 验证触发了 Control+S 键盘快捷键兜底保存
+            mock_page.keyboard.press.assert_called_with("Control+S")
+
 
 # =====================================================================
 # 4. 评测监听与自愈熔断器测试 (Evaluation & Circuit Breaker Tests)

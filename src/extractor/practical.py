@@ -41,6 +41,7 @@ class PracticalExtractor(BaseExtractor):
     # 编辑器容器选择器
     EDITOR_CONTAINER_SELECTORS = [
         ".monaco-editor",
+        ".my-monaco-editor",
         "#monaco-editor",
         ".monaco-container",
         ".ace_editor",
@@ -67,7 +68,7 @@ class PracticalExtractor(BaseExtractor):
             if hasattr(page_or_html, "evaluate") and callable(page_or_html.evaluate):
                 try:
                     has_editor = page_or_html.evaluate(
-                        "() => !!((window.monaco && window.monaco.editor) || window.ace || document.querySelector('.monaco-editor'))"
+                        "() => !!(((window.monaco || window.Monaco) && (window.monaco || window.Monaco).editor) || window.ace || document.querySelector('.monaco-editor, .my-monaco-editor'))"
                     )
                     if has_editor:
                         return True
@@ -409,12 +410,41 @@ class PracticalExtractor(BaseExtractor):
                 js_script = """
                 () => {
                     try {
-                        if (window.monaco && window.monaco.editor) {
-                            const models = window.monaco.editor.getModels();
+                        const m = window.monaco || window.Monaco;
+                        if (m && m.editor) {
+                            const models = m.editor.getModels();
                             if (models && models.length > 0) {
                                 return {
                                     code: models[0].getValue(),
                                     language: models[0].getLanguageId ? models[0].getLanguageId() : "",
+                                    editor_type: "monaco"
+                                };
+                            }
+                        }
+                        // 也支持从 React / Vue Fiber 探查
+                        const editorEls = document.querySelectorAll('.monaco-editor, .my-monaco-editor');
+                        for (const el of editorEls) {
+                            const fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+                            if (fiberKey) {
+                                let curr = el[fiberKey];
+                                while (curr) {
+                                    const props = curr.memoizedProps || {};
+                                    const state = curr.memoizedState || {};
+                                    const ed = props.monacoEditor || props.editor || state.monacoEditor || state.editor;
+                                    if (ed && typeof ed.getValue === 'function') {
+                                        return {
+                                            code: ed.getValue(),
+                                            language: typeof ed.getModel === 'function' && ed.getModel() && ed.getModel().getLanguageId ? ed.getModel().getLanguageId() : "",
+                                            editor_type: "monaco"
+                                        };
+                                    }
+                                    curr = curr.return;
+                                }
+                            }
+                            if (el.__vue__ && el.__vue__.editor && typeof el.__vue__.editor.getValue === 'function') {
+                                return {
+                                    code: el.__vue__.editor.getValue(),
+                                    language: "",
                                     editor_type: "monaco"
                                 };
                             }
@@ -445,7 +475,9 @@ class PracticalExtractor(BaseExtractor):
                 logger.debug(f"通过 JS 提取编辑器代码失败，转入 DOM 提取: {e}")
 
         # 2. 从 DOM 中查找 Monaco Editor 渲染的文本行
-        view_lines = soup.select(".monaco-editor .view-lines .view-line")
+        view_lines = soup.select(".monaco-editor .view-lines .view-line, .my-monaco-editor .view-lines .view-line")
+        if not view_lines:
+            view_lines = soup.select(".view-lines .view-line")
         if view_lines:
             lines = [line.get_text() for line in view_lines]
             return "\n".join(lines), "", "monaco"
