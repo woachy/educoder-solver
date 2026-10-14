@@ -23,12 +23,17 @@ flowchart TD
     Check -->|在线就绪| DetectPage{"步骤 2: 判定当前页面类型"}
     
     %% 分支 1: 课堂大作业列表页
-    DetectPage -->|处于课程/课堂作业列表页<br>包含多个大题/实训卡片| Cruise["步骤 3A: 课堂全自动巡航<br>run-classroom-homework --min-duration 60 --json"]
+    DetectPage -->|处于课程/课堂作业列表页| ChooseMode{"选择作业推进模式"}
+    ChooseMode -->|推荐: 短连接 Agent 单步原子流| Step1["步骤 3A: 扫描列表 (list-tasks --json)"]
+    Step1 --> Step2["步骤 3B: 开启大题 (open-task --json)"]
+    Step2 --> Dump
+    
+    ChooseMode -->|可选: 长连接守护进程流| Cruise["步骤 3C: 交互式巡航 (30s 超时保护)<br>run-classroom-homework --interactive --json"]
     Cruise --> CruiseReport["解析巡航汇总报表 -> 向用户展示全课程完成情况"]
     CruiseReport --> End["完成交付"]
 
     %% 分支 2: 单题目关卡页
-    DetectPage -->|处于具体题目关卡页| Dump["步骤 3B: 提取题目结构 (dump-question --json)"]
+    DetectPage -->|处于具体题目关卡页| Dump["步骤 3D: 提取题目结构 (dump-question --json)"]
     Dump --> QuestionType{"判定具体题型"}
 
     QuestionType -->|choice / judgment| SolveChoice["推演算题 -> 提交选项 (submit-choice)"]
@@ -106,52 +111,69 @@ Windows 推荐执行命令前缀：`.\.venv\Scripts\python -m src.cli`
 
 ---
 
-### 2.2 课堂大作业全自动巡航 (`run-classroom-homework`) [v3 新增，课程作业首选]
+### 2.2 课堂大作业推进工作流 (Classroom Homework Workflows)
 
-当当前页面处于**课堂实训作业列表页**（URL 含 `classrooms`, `homeworks`, `shixuns`，且页面展示多道未完成实训大题）时，**直接使用此指令一键全自动巡航**。底层将自动执行：列表扫描 -> 过滤未完成 -> 新开 Tab -> 关卡推进 -> 控速等待 -> 双轨评测 -> 安全关闭 Tab -> 刷新列表 -> 推进下一题。
+当当前页面处于**课堂实训作业列表页**（URL 含 `classrooms`, `homeworks`, `shixuns`，且展示多道大题卡片）时，系统提供两种互补的工作流：
+
+#### 2.2.1 推荐模式：AI Agent 单步原子流 (短连接一问一答首选)
+
+针对短连接执行环境，将巡航拆解为非阻塞单步命令，每步独立返回，彻底规避长连接死锁：
+
+1. **只读扫描作业列表 (`list-tasks`)**：
+   ```powershell
+   .\.venv\Scripts\python -m src.cli list-tasks --json
+   # 若打开了多个标签页，可显式匹配：
+   .\.venv\Scripts\python -m src.cli list-tasks --match homework --json
+   ```
+   **JSON 回执**：
+   ```json
+   {
+     "status": "success",
+     "total_tasks": 6,
+     "completed_tasks": 2,
+     "pending_tasks": 4,
+     "tasks": [
+       {"index": 0, "title": "实训大题 #1", "status": "已完成", "is_completed": true, "can_operate": false},
+       {"index": 1, "title": "实训大题 #2", "status": "未完成", "is_completed": false, "can_operate": true}
+     ]
+   }
+   ```
+
+2. **单步开启指定大题 (`open-task`)**：
+   ```powershell
+   # 默认开启第 1 个待完成大题
+   .\.venv\Scripts\python -m src.cli open-task --json
+   # 或指定大题索引：
+   .\.venv\Scripts\python -m src.cli open-task --index 1 --json
+   ```
+   底层将自动点击卡片按钮、等待并捕获新标签页、将其激活置顶并清理遮罩，返回首关概要。
+
+3. **进入关卡循环作答**：
+   直接使用单题工具 `dump-question` -> `solve-cycle --auto-next` 流转；整道大题通关后，再次调用 `list-tasks` 扫描并推进下一题。
+
+#### 2.2.2 守护模式：交互式巡航 (`run-classroom-homework`)
+
+适用于具备长连接与实时双向 stdio 管道的外部守护进程：
 
 ```powershell
-# 标准巡航：连续推进待完成大题，每关控速 60 秒 (推荐)
-.\.venv\Scripts\python -m src.cli run-classroom-homework --min-duration 60 --json
+# 交互式巡航 (stdio JSON Lines 协议，内置 30s 超时看门狗防假死)
+.\.venv\Scripts\python -m src.cli run-classroom-homework --interactive --min-duration 60 --json
 
-# 限制单次最多推进 3 道大题
-.\.venv\Scripts\python -m src.cli run-classroom-homework --max-tasks 3 --min-duration 60 --json
-
-# 快速自测模式 (min-duration 设为 0，直出不等待)
-.\.venv\Scripts\python -m src.cli run-classroom-homework --min-duration 0 --json
+# 演练模式 (仅扫描列出待做题目，不点击任何操作)
+.\.venv\Scripts\python -m src.cli run-classroom-homework --dry-run --json
 ```
 
-#### JSON 输出契约
-```json
-{
-  "status": "success",
-  "total_tasks_found": 8,
-  "tasks_processed": 3,
-  "tasks_completed": 3,
-  "tasks_skipped": 5,
-  "tasks_failed": 0,
-  "details": [
-    {
-      "task_name": "实训大题 #1 (表的操作与数据完整性)",
-      "initial_status": "未完成",
-      "final_status": "已完成",
-      "levels_passed": 4,
-      "success": true
-    },
-    {
-      "task_name": "实训大题 #2 (多表连接查询)",
-      "initial_status": "未完成",
-      "final_status": "已完成",
-      "levels_passed": 3,
-      "success": true
-    }
-  ],
-  "elapsed_seconds": 382.4
-}
-```
+**交互握手协议格式**：
+1. CLI 检测到题目后向 `stdout` 输出：
+   `{"event": "question_detected", "task_title": "...", "level_index": 1, "question_type": "practical", "question_data": {...}}`
+2. 外部控制器从 `stdin` 输入动作 JSON：
+   `{"action": "solve", "code": "SELECT 1;", "target_only": true}` 或 `{"action": "skip"}`
+3. CLI 完成评测并向 `stdout` 输出结果：
+   `{"event": "eval_result", "passed": true, "diff_hint": "..."}`
 
 > **AI 行为准则**：
-> **严禁**在此类页面手写临时 Python 脚本去逐个查找元素或操作 Tab！直接下发 `run-classroom-homework`，底层会自动处理好跨标签页生命周期并返回汇总报表。
+> **严禁**在此类页面手写临时 Python 脚本去逐个查找元素或操作 Tab！请根据自身工具调用形态，选择 **单步原子流（模式 2.2.1）** 或 **交互式协程流（模式 2.2.2）**。
+
 
 ---
 
@@ -320,8 +342,12 @@ Windows 推荐执行命令前缀：`.\.venv\Scripts\python -m src.cli`
 | 现象 | 可能原因 | AI 对策 |
 | :--- | :--- | :--- |
 | `check-browser` 提示 `cdp_available: false` | 物理浏览器未开启 9222 调试端口 | 提示用户在终端运行 `.\scripts\launch_browser.ps1` |
-| `dump-question` 返回 `type: unknown` | 处于课程目录页或页面加载尚未完成 | 若在作业列表页，直接改用 `run-classroom-homework`；若在关卡页，等待 2 秒重试 |
-| 在作业列表页卡住不知如何推进 | 误将列表页当成单题关卡 | 直接调用 `python -m src.cli run-classroom-homework --min-duration 60 --json` |
+| 执行巡航命令时进程挂住/死锁 | 交互模式 (`--interactive`) 卡在等待 stdin，但 Agent 属于一问一答短连接调用 | 系统已内置 30s 超时看门狗自动释放退出；**强烈推荐换用单步原子流（`list-tasks` -> `open-task` -> `solve-cycle`）**，彻底避免长连接死锁 |
+| `list-tasks` 扫描到 0 道大题 / 空跑 | 浏览器停留在 `/classrooms` 班级总览页而非作业列表页，或打开了多个干扰标签页 | 使用 `--match` 参数精确指定作业页面关键词，如 `list-tasks --match homework --json`，或请用户点进具体作业列表 |
+| 实训题提示靶心代码为空/拒绝评测 | 靶心代码区域未识别或解题代码为空 | 底层已加入空模板防护，不再拿空白代码盲评；请先 `dump-question` 查看任务要求，再使用 `solve-cycle --code "<代码>"` 正式作答 |
+| `dump-question` 返回 `type: unknown` | 处于课程目录页或页面加载尚未完成 | 若在作业列表页，改用 `list-tasks`；若在关卡页，等待 2 秒后重试 |
+| 在作业列表页不知如何推进且不敢写脚本 | 陷入“禁止写临时脚本”与“缺少单步命令”的困境 | 官方原生提供单步推进命令：`list-tasks` 扫列表 -> `open-task` 开大题 -> 关卡内 `solve-cycle` 闭环做题，无需写任何临时脚本 |
 | `submit-choice` 未能成功勾选 | 选项标识匹配异常（题干使用特殊序号或带括号） | 从 `dump-question` 返回的 `options` 中提取确切的 `id` 或文本重新尝试 |
 | `solve-cycle` 报错提示超时 | 头歌后台排队评测中或代码中含有死循环 | 检查代码是否存在死循环；超时后先 `dump-question` 观察状态 |
 | 评测出现指针拦截错误 (`intercepts pointer events`) | 平台弹出通关庆祝模态框未完全关闭 | 底层 `ModalSweeper` 会自动扫除；若仍出现，提示用户手动在物理浏览器上点击关闭 |
+
