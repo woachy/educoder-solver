@@ -38,9 +38,14 @@
 
 ---
 
-## 5. 工具交付沉淀为本地 Skill 与 AI 手册
-- 工具核心功能打通后，主动封装为本地专属 Skill（实现 `/skill + 一句话需求` 即可闭环唤醒）；
-- 编写面向后续 AI Agent 消费的操作手册（`AI_MANUAL.md`），明确状态机模型、JSON 契约、排障对照表与低熵交互规范。
+## 5. 工具交付沉淀为本地 Skill 与 AI 手册 (多端强一致性同步)
+- **封装本地专属 Skill**：工具核心功能打通后，主动封装为本地专属 Skill（实现 `/skill + 一句话需求` 即可闭环唤醒）。
+- **编写 AI 消费手册**：维护面向后续 AI Agent 的操作手册（`docs/AI_MANUAL.md`），明确状态机模型、JSON 契约、排障对照表与低熵交互规范。
+- **多端强一致性同步铁律**：凡涉及核心 CLI 接口、工作流规范或解题策略调整，必须保持“四位一体”同步更新，严禁脱节交付：
+  1. 工程内部手册：`docs/AI_MANUAL.md`
+  2. 工程内部 Skill 及其附录：`.agents/skills/<skill>/SKILL.md` 与 `references/`
+  3. Antigravity 全局技能库：`~/.gemini/config/skills/<skill>/`
+  4. Codex 全局技能库：`~/.codex/skills/<skill>/`
 
 ---
 

@@ -41,6 +41,11 @@
 - **只读最小侵入**：默认通过 DOM 查询提取题目，除非必要不注入破坏性脚本；执行代码写入前必须自动进行本地持久化快照备份（`.cache/backups/`）。
 - **真实拟真延迟**：选择题点击与代码提交间必须加入随机微延迟（0.5s - 1.5s），禁止机器级并发连点触发防刷风控。
 - **结构化 JSON 输出**：CLI 工具对外输出必须保持格式整洁的 JSON，便于 AI Agent 无损解析并推演。
+- **文档与 Skill 多端强一致性同步规范 (Documentation & Skill Sync)**：凡涉及 CLI 命令变动、参数增删、核心工作流演化（如单步原子流、超时保护）或解题机制升级时，**必须同步更新全部相关文档与 Skill 资产**。包括：
+  1. 面向 AI 的操作手册：`docs/AI_MANUAL.md`（参数契约、握手协议与排障对照表）；
+  2. 工程内部专属 Skill：`.agents/skills/educoder-solver/SKILL.md` 及其内部附录 `.agents/skills/educoder-solver/references/ai_manual.md`；
+  3. 多端宿主全局 Skill 库：同步覆盖至 Antigravity 全局技能库（`~/.gemini/config/skills/educoder-solver/`）与 Codex 全局技能库（`~/.codex/skills/educoder-solver/`）；
+  4. 提交版本库时，文档与 Skill 资产必须一并纳入 Git 提交。
 - **测试通过再交付**：代码修改后必须执行全套测试（`pytest`），全绿通过方可交付，禁止提交带有未捕获异常的代码。
 
 ### Ask first (变更前确认)
@@ -48,6 +53,7 @@
 - **引入庞大依赖**：引入除轻量网络/解析/CLI 之外的新重型库（如 Selenium、庞大视觉框架）前，需说明必要性并确认。
 
 ### Never do (绝对红线)
+- **严禁代码与文档 Skill 脱节交付**：严禁在更新了核心 CLI 接口或工作流规范后，遗漏对 `docs/AI_MANUAL.md`、`SKILL.md`（含附录 `references/ai_manual.md`）及宿主全局 Skill 库的同步更新，防止后续 AI Agent 读取过时契约导致交互死锁或空跑。
 - **严禁向大模型吐出未经清洗的大段 DOM/HTML 杂音**：严禁将原始网页树、内联样式、base64 图片数据、第三方脚本或未解析的 DOM 源码塞入上下文，防止污染 AI 心智带宽。
 - **严禁直接秒刷导致被教师端审计**：禁止在生产环境关卡绕过思考控速机制以低于 5 秒的时长连刷通关。
 - **严禁私自编写临时 Python 脚本切换 Tab 或操作题目**：严禁在项目根目录或 `.cache/` 临时生成 `.py` 脚本来执行浏览器操作，所有列表扫描、大题开启、代码注入、关卡评测必须全部使用官方 CLI 子命令。
