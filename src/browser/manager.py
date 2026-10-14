@@ -142,12 +142,21 @@ class BrowserSession:
                 result.append({"title": "<unknown>", "url": "<unknown>"})
         return result
 
-    def get_target_page(self, url_keyword: str = "educoder.net", fallback_first: bool = True) -> Page:
+    def get_target_page(
+        self,
+        url_keyword: str = "educoder.net",
+        fallback_first: bool = True,
+        prefer_type: str = "any",
+    ) -> Page:
         """优先定位包含指定关键字的目标标签页。
 
         Args:
             url_keyword: 匹配的 URL 或标题关键字，默认 'educoder.net'
             fallback_first: 若未找到匹配标签页，是否容错回退至第一个可用标签页
+            prefer_type: 页面偏好类型，可选值:
+                - 'any': 保持默认优先级（优先实训关卡，其次作业列表）
+                - 'classroom': 优先匹配课堂作业列表页（/shixun_homework、/homeworks、/classrooms/\\d+），未找到才回退至实训关卡或其它页面
+                - 'shixun': 优先匹配实训关卡作答页（/tasks/ 或 /shixuns/），未找到才回退至作业列表页
 
         Returns:
             Page: 目标页面实例
@@ -155,6 +164,8 @@ class BrowserSession:
         Raises:
             TargetPageNotFoundError: 未找到匹配标签页且无法回退时抛出
         """
+        import re
+
         current_pages = self.pages
         if not current_pages:
             raise TargetPageNotFoundError("当前浏览器中未检测到任何已打开的标签页。")
@@ -169,30 +180,59 @@ class BrowserSession:
                 except Exception:
                     continue
 
-        # 2. 最优先匹配具体的实训/任务关卡作答页面 (/tasks/ 或 /shixuns/)
-        for page in current_pages:
+        def _is_shixun(p: Page) -> bool:
             try:
-                u = page.url.lower()
-                if "educoder.net" in u and ("/tasks/" in u or "/shixuns/" in u):
-                    logger.info(f"已精准匹配实训关卡作答页面: [{page.title()}]({page.url})")
-                    return page
+                u = p.url.lower()
+                return "educoder.net" in u and ("/tasks/" in u or "/shixuns/" in u)
             except Exception:
-                continue
+                return False
 
-        # 3. 其次匹配具体的课堂作业/实训列表页 (如 /shixun_homework, /homeworks, /classrooms/<id>)
-        # 排除无作业卡片的全局班级列表 (/classrooms 根路径) 与个人主页
-        import re
-        for page in current_pages:
+        def _is_classroom(p: Page) -> bool:
             try:
-                u = page.url.lower()
+                u = p.url.lower()
                 if "educoder.net" in u:
-                    if "/shixun_homework" in u or "/homeworks" in u or re.search(r"/classrooms/\d+", u):
-                        logger.info(f"已精准匹配课堂作业列表页面: [{page.title()}]({page.url})")
-                        return page
+                    return bool("/shixun_homework" in u or "/homeworks" in u or re.search(r"/classrooms/\d+", u))
             except Exception:
-                continue
+                return False
 
-        # 4. 再次按 URL 包含关键字匹配 (优先非纯 /classrooms 总览页)
+        p_type = (prefer_type or "any").lower()
+
+        # 2. 根据 prefer_type 优先级进行定向匹配
+        if p_type == "classroom":
+            # 优先匹配课堂作业列表页
+            for page in current_pages:
+                if _is_classroom(page):
+                    try:
+                        logger.info(f"已精准匹配课堂作业列表页面: [{page.title()}]({page.url})")
+                    except Exception:
+                        pass
+                    return page
+            # 未找到时回退至实训关卡作答页
+            for page in current_pages:
+                if _is_shixun(page):
+                    try:
+                        logger.info(f"课堂列表未命中，回退匹配实训关卡页面: [{page.title()}]({page.url})")
+                    except Exception:
+                        pass
+                    return page
+        else:
+            # prefer_type == "shixun" 或 "any"：保持默认优先级（实训关卡优先，其次作业列表）
+            for page in current_pages:
+                if _is_shixun(page):
+                    try:
+                        logger.info(f"已精准匹配实训关卡作答页面: [{page.title()}]({page.url})")
+                    except Exception:
+                        pass
+                    return page
+            for page in current_pages:
+                if _is_classroom(page):
+                    try:
+                        logger.info(f"已精准匹配课堂作业列表页面: [{page.title()}]({page.url})")
+                    except Exception:
+                        pass
+                    return page
+
+        # 3. 再次按 URL 包含关键字匹配 (优先非纯 /classrooms 总览页)
         for page in current_pages:
             try:
                 u = page.url.lower()
@@ -202,7 +242,7 @@ class BrowserSession:
             except Exception:
                 continue
 
-        # 5. 按标题包含关键字匹配
+        # 4. 按标题包含关键字匹配
         for page in current_pages:
             try:
                 if url_keyword.lower() in page.title().lower():
@@ -211,7 +251,7 @@ class BrowserSession:
             except Exception:
                 continue
 
-        # 6. 兜底匹配任意包含 url_keyword 的页面
+        # 5. 兜底匹配任意包含 url_keyword 的页面
         for page in current_pages:
             try:
                 if url_keyword.lower() in page.url.lower():

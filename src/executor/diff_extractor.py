@@ -23,8 +23,8 @@ from playwright.sync_api import Page
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
-def clean_text_content(raw: Optional[str]) -> str:
-    """清洗提取到的文本内容：去除 ANSI 码、反转义实体、规范换行与首尾空白。"""
+def clean_text_content(raw: Optional[str], preserve_trailing_spaces: bool = True) -> str:
+    """清洗提取到的文本内容：去除 ANSI 码、反转义实体、规整首尾多余空行。"""
     if not raw:
         return ""
     # 去除 ANSI 终端颜色码
@@ -34,12 +34,17 @@ def clean_text_content(raw: Optional[str]) -> str:
     # 替换不可见特殊空格为普通空格
     cleaned = cleaned.replace("\u00a0", " ").replace("\u200b", "").replace("\ufeff", "")
     # 规整行尾多余空白，保留换行
-    lines = [line.rstrip() for line in cleaned.splitlines()]
-    # 去除首尾空行
-    while lines and not lines[0]:
+    if preserve_trailing_spaces:
+        lines = [line.rstrip("\r") for line in cleaned.splitlines()]
+    else:
+        lines = [line.rstrip() for line in cleaned.splitlines()]
+    # 去除首尾多余空行
+    while len(lines) > 1 and not lines[0].strip():
         lines.pop(0)
-    while lines and not lines[-1]:
+    while len(lines) > 1 and not lines[-1].strip():
         lines.pop()
+    if len(lines) == 1 and not lines[0]:
+        return ""
     return "\n".join(lines)
 
 
@@ -52,11 +57,11 @@ def _extract_labeled_content(soup: BeautifulSoup, labels: List[str]) -> str:
     if is_expected:
         target_elem = soup.select_one(".expected-output, .expected, [data-test='expected'], .expect-box, .testcase-expected")
         if target_elem:
-            return clean_text_content(target_elem.get_text())
+            return clean_text_content(target_elem.get_text(), preserve_trailing_spaces=True)
     elif is_actual:
         target_elem = soup.select_one(".actual-output, .actual, [data-test='actual'], .actual-box, .testcase-actual")
         if target_elem:
-            return clean_text_content(target_elem.get_text())
+            return clean_text_content(target_elem.get_text(), preserve_trailing_spaces=True)
 
     # 2. 定位文本标签 (寻找最内层标签元素，避免外层容器干扰)
     for tag_name in ["h4", "h5", "h3", "h6", "label", "span", "b", "strong", "p", "div"]:
@@ -88,10 +93,10 @@ def _extract_labeled_content(soup: BeautifulSoup, labels: List[str]) -> str:
             if sibling:
                 sub_pre = sibling.find(["pre", "code"]) or (sibling if sibling.name in ["pre", "code"] else None)
                 if sub_pre:
-                    return clean_text_content(sub_pre.get_text())
+                    return clean_text_content(sub_pre.get_text(), preserve_trailing_spaces=True)
                 sib_text = sibling.get_text()
                 if sib_text and not any(other in sib_text for other in ["实际输出", "预期输出", "控制台"]):
-                    return clean_text_content(sib_text)
+                    return clean_text_content(sib_text, preserve_trailing_spaces=True)
 
             # B. 检查父节点的下一个兄弟节点 (如 <div class="title">预期输出</div><div class="content"><pre>...</pre></div>)
             parent = el.parent
@@ -101,21 +106,23 @@ def _extract_labeled_content(soup: BeautifulSoup, labels: List[str]) -> str:
                     sub_pre = p_sibling.find(["pre", "code"]) or p_sibling
                     sib_text = sub_pre.get_text()
                     if sib_text and not any(other in sib_text for other in ["实际输出", "预期输出", "控制台"]):
-                        return clean_text_content(sib_text)
+                        return clean_text_content(sib_text, preserve_trailing_spaces=True)
 
             # C. 自身包含 pre / code
             nested_pre = el.find(["pre", "code"])
             if nested_pre:
-                return clean_text_content(nested_pre.get_text())
+                return clean_text_content(nested_pre.get_text(), preserve_trailing_spaces=True)
 
             # D. 单行内文本切分 (如 "预期输出：8")
             for l in labels:
                 if l in text:
                     parts = text.split(l, 1)
                     if len(parts) > 1 and parts[1].strip():
-                        content = parts[1].lstrip(":：").strip()
+                        content = parts[1].lstrip(":： \t\r\n").rstrip("\r\n")
+                        if not content and parts[1].lstrip(":："):
+                            content = parts[1].lstrip(":：").rstrip("\r\n")
                         if content:
-                            return clean_text_content(content)
+                            return clean_text_content(content, preserve_trailing_spaces=True)
 
     return ""
 
@@ -166,6 +173,42 @@ def _parse_pass_status_and_ratio(full_text: str) -> Tuple[bool, str]:
     return passed, ratio
 
 
+def _line_by_line_diff(expected: str, actual: str) -> Optional[str]:
+    """逐行比对预期与实际输出，优先定位并生成高精度的行级差异提示。
+
+    当某行核心文本一致但存在空白字符（如末尾空格、制表符等）差异时，返回精准的行级提示：
+    "第 {i + 1} 行文本一致但空白字符不匹配: 预期={line_exp!r} vs 实际={line_act!r} (请检查末尾空格或制表符)"
+    """
+    exp_lines = expected.splitlines()
+    act_lines = actual.splitlines()
+
+    # 1. 逐行比对共同行
+    min_len = min(len(exp_lines), len(act_lines))
+    for i in range(min_len):
+        line_exp = exp_lines[i]
+        line_act = act_lines[i]
+        if line_exp != line_act:
+            if line_exp.strip() == line_act.strip():
+                return f"第 {i + 1} 行文本一致但空白字符不匹配: 预期={line_exp!r} vs 实际={line_act!r} (请检查末尾空格或制表符)"
+            if line_exp.lower() == line_act.lower():
+                return f"第 {i + 1} 行大小写不匹配: 预期 '{line_exp[:40]}' vs 实际 '{line_act[:40]}'"
+            if len(exp_lines) == len(act_lines):
+                return f"第 {i + 1} 行内容不匹配: 预期 '{line_exp[:40]}' vs 实际 '{line_act[:40]}'"
+            return (
+                f"行数不匹配 (预期 {len(exp_lines)} 行, 实际 {len(act_lines)} 行); "
+                f"第 {i + 1} 行首度不匹配: 预期 '{line_exp[:40]}' vs 实际 '{line_act[:40]}'"
+            )
+
+    # 2. 公共行全部一致但总行数不同
+    if len(exp_lines) != len(act_lines):
+        return f"行数不匹配: 预期输出 {len(exp_lines)} 行，实际输出 {len(act_lines)} 行"
+
+    return None
+
+
+line_by_line_diff = _line_by_line_diff
+
+
 def generate_diff_hint(
     expected: str,
     actual: str,
@@ -195,49 +238,38 @@ def generate_diff_hint(
         if expected.strip() and not actual.strip():
             return "实际输出为空 (无任何控制台输出或返回值)"
 
+        # 隐形字符/行尾空格不一致专项优先比对
+        if expected != actual and expected.strip() == actual.strip():
+            return (
+                f"⚠️ 核心文本完全一致，但存在隐形空白字符/换行不匹配！"
+                f"预期长度 {len(expected)} (尾部 repr: {expected[-10:]!r}) vs "
+                f"实际长度 {len(actual)} (尾部 repr: {actual[-10:]!r})。"
+                f"请特别检查输出末尾是否缺少或多出空格/换行！"
+            )
+
         if expected == actual:
             return f"当前测试集输出与预期一致 (可能存在其他未通过的隐藏测试集: {pass_ratio})" if pass_ratio else "当前测试集输出与预期一致"
 
-        # 空白差异检测 (仅尾部空格或换行不同)
-        if expected.rstrip() == actual.rstrip():
-            if actual.endswith("\n") and not expected.endswith("\n"):
-                return "空白字符差异: 实际输出末尾多出空行或换行"
-            elif not actual.endswith("\n") and expected.endswith("\n"):
-                return "空白字符差异: 实际输出末尾缺少换行符"
-            else:
-                return "空白字符差异: 存在首尾不可见空格差异"
-
-        # 行数比对
-        exp_lines = expected.splitlines()
-        act_lines = actual.splitlines()
-        if len(exp_lines) != len(act_lines):
-            for idx, (el, al) in enumerate(zip(exp_lines, act_lines), start=1):
-                if el != al:
-                    return (
-                        f"行数不匹配 (预期 {len(exp_lines)} 行, 实际 {len(act_lines)} 行); "
-                        f"第 {idx} 行首度不匹配: 预期 '{el[:40]}' vs 实际 '{al[:40]}'"
-                    )
-            return f"行数不匹配: 预期输出 {len(exp_lines)} 行，实际输出 {len(act_lines)} 行"
-
-        # 逐行内容比对
-        for idx, (el, al) in enumerate(zip(exp_lines, act_lines), start=1):
-            if el != al:
-                if el.lower() == al.lower():
-                    return f"第 {idx} 行大小写不匹配: 预期 '{el[:40]}' vs 实际 '{al[:40]}'"
-                if el.strip() == al.strip():
-                    return f"第 {idx} 行缩进或前后空格不匹配: 预期 '{el}' vs 实际 '{al}'"
-                return f"第 {idx} 行内容不匹配: 预期 '{el[:40]}' vs 实际 '{al[:40]}'"
+        # 逐行内容与行数比对
+        line_diff = _line_by_line_diff(expected, actual)
+        if line_diff:
+            return line_diff
 
     if pass_ratio:
         return f"测试用例未通过 ({pass_ratio})"
     return "评测未通过，请结合控制台报错检查代码逻辑"
 
 
-def extract_testcase_diff(page_or_html: Union[Page, str, Any]) -> Dict[str, Any]:
+def extract_testcase_diff(
+    page_or_html: Union[Page, str, Any] = "",
+    error_output: Optional[str] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
     """从头歌评测结果 DOM 或 HTML 源码中提取高密度测试集 Diff。
 
     Args:
-        page_or_html: Playwright Page 实例或静态 HTML 字符串
+        page_or_html: Playwright Page 实例、静态 HTML 字符串或控制台标准输出 stdout
+        error_output: 可选的控制台标准错误/异常输出
 
     Returns:
         dict:
@@ -249,6 +281,11 @@ def extract_testcase_diff(page_or_html: Union[Page, str, Any]) -> Dict[str, Any]
             - stdout_msg (str): 控制台标准输出
             - error_msg (str): 错误日志或异常栈
     """
+    if not page_or_html and "stdout" in kwargs:
+        page_or_html = kwargs["stdout"]
+    if not error_output and "error_msg" in kwargs:
+        error_output = kwargs["error_msg"]
+
     html_content = ""
 
     # 1. 统一提取 HTML 源码
@@ -266,14 +303,15 @@ def extract_testcase_diff(page_or_html: Union[Page, str, Any]) -> Dict[str, Any]
             html_content = ""
 
     if not html_content.strip():
+        err = clean_text_content(error_output) if error_output else ""
         return {
             "passed": False,
             "pass_ratio": "",
             "expected": "",
             "actual": "",
-            "diff_hint": "未获取到评测输出",
+            "diff_hint": f"代码执行异常: {err}" if err else "未获取到评测输出",
             "stdout_msg": "",
-            "error_msg": "",
+            "error_msg": err,
         }
 
     soup = BeautifulSoup(html_content, "html.parser")
@@ -303,9 +341,24 @@ def extract_testcase_diff(page_or_html: Union[Page, str, Any]) -> Dict[str, Any]
                 pass_cnt = sum(1 for ts in fiber_data if ts.get("result") is True)
                 ratio_str = f"{pass_cnt}/{total_cnt}"
                 is_all_passed = (pass_cnt == total_cnt)
-                first_fail = next((ts for ts in fiber_data if ts.get("result") is not True), None)
-                expected_str = clean_text_content(first_fail.get("output", "")) if first_fail else ""
-                actual_str = clean_text_content(first_fail.get("actual_output", "")) if first_fail else ""
+
+                # 多测试集比对：优先寻找存在隐形字符/行尾空格差异的失败用例
+                target_fail = None
+                for ts in fiber_data:
+                    if ts.get("result") is not True:
+                        exp_cand = clean_text_content(ts.get("output", ""), preserve_trailing_spaces=True)
+                        act_cand = clean_text_content(ts.get("actual_output", ""), preserve_trailing_spaces=True)
+                        if exp_cand != act_cand and exp_cand.strip() == act_cand.strip():
+                            target_fail = (exp_cand, act_cand)
+                            break
+
+                if target_fail:
+                    expected_str, actual_str = target_fail
+                else:
+                    first_fail = next((ts for ts in fiber_data if ts.get("result") is not True), None)
+                    expected_str = clean_text_content(first_fail.get("output", ""), preserve_trailing_spaces=True) if first_fail else ""
+                    actual_str = clean_text_content(first_fail.get("actual_output", ""), preserve_trailing_spaces=True) if first_fail else ""
+
                 diff_hint_str = generate_diff_hint(expected_str, actual_str, "", is_all_passed, ratio_str)
                 return {
                     "passed": is_all_passed,
@@ -345,19 +398,31 @@ def extract_testcase_diff(page_or_html: Union[Page, str, Any]) -> Dict[str, Any]
 
     # 兜底：若 DOM 结构较深，尝试通过正则在纯文本中捕获
     if not expected:
-        m_exp = re.search(r"【?预期输出】?\s*[:：]?\s*\n?([\s\S]*?)(?=【?实际输出】?|【?控制台输出】?|测试说明|\Z)", full_text)
+        m_exp = re.search(
+            r"(?:【?预期输出】?|【?期望输出】?|Expected)\s*[:：]?\s*\n?([\s\S]*?)(?=(?:【?实际输出】?|【?你的输出】?|Actual|【?控制台输出】?|测试说明|\Z))",
+            full_text,
+            re.IGNORECASE,
+        )
         if m_exp:
-            exp_cand = m_exp.group(1).strip()
+            exp_cand = m_exp.group(1).rstrip("\r\n")
+            if exp_cand.startswith("\n"):
+                exp_cand = exp_cand.lstrip("\n")
             # 过滤包含实际输出关键字的情况
             if "实际输出" not in exp_cand and len(exp_cand) < 2000:
-                expected = clean_text_content(exp_cand)
+                expected = clean_text_content(exp_cand, preserve_trailing_spaces=True)
 
     if not actual:
-        m_act = re.search(r"【?实际输出】?\s*[:：]?\s*\n?([\s\S]*?)(?=【?预期输出】?|【?控制台输出】?|测试说明|\Z)", full_text)
+        m_act = re.search(
+            r"(?:【?实际输出】?|【?你的输出】?|Actual)\s*[:：]?\s*\n?([\s\S]*?)(?=(?:【?预期输出】?|【?期望输出】?|Expected|【?控制台输出】?|测试说明|\Z))",
+            full_text,
+            re.IGNORECASE,
+        )
         if m_act:
-            act_cand = m_act.group(1).strip()
+            act_cand = m_act.group(1).rstrip("\r\n")
+            if act_cand.startswith("\n"):
+                act_cand = act_cand.lstrip("\n")
             if "预期输出" not in act_cand and len(act_cand) < 2000:
-                actual = clean_text_content(act_cand)
+                actual = clean_text_content(act_cand, preserve_trailing_spaces=True)
 
     # 5. 提取控制台输出 (stdout) 与 报错日志 (error_msg)
     stdout_lines: List[str] = []
@@ -392,6 +457,9 @@ def extract_testcase_diff(page_or_html: Union[Page, str, Any]) -> Dict[str, Any]
     error_msg = clean_text_content("\n".join(error_lines[:15]))
     stdout_msg = clean_text_content("\n".join(stdout_lines[:30]))
 
+    if error_output and not error_msg:
+        error_msg = clean_text_content(error_output)
+
     # 若通过，则清空报错
     if passed:
         error_msg = ""
@@ -408,3 +476,12 @@ def extract_testcase_diff(page_or_html: Union[Page, str, Any]) -> Dict[str, Any]
         "stdout_msg": stdout_msg,
         "error_msg": error_msg,
     }
+
+
+__all__ = [
+    "clean_text_content",
+    "extract_testcase_diff",
+    "generate_diff_hint",
+    "_line_by_line_diff",
+    "line_by_line_diff",
+]

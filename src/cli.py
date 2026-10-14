@@ -147,9 +147,10 @@ def cmd_dump_question(args: argparse.Namespace) -> None:
         except ValueError:
             pass
 
+    keyword = getattr(args, "match", None) or config.browser.target_domain
     try:
         with BrowserSession() as session:
-            page = session.get_target_page(config.browser.target_domain)
+            page = session.get_target_page(keyword, prefer_type="shixun")
             q_data: QuestionData = extract_question(page, force_type=force_type)
             result_dict = q_data.to_dict()
 
@@ -208,6 +209,7 @@ def cmd_dump_question(args: argparse.Namespace) -> None:
                 prac_content = [
                     f"[bold yellow]编程语言:[/bold yellow] {pd.language or 'unknown'}",
                     f"[bold yellow]Begin-End 区域标记:[/bold yellow] {'已检测到' if pd.has_target_marker else '未检测到'}",
+                    f"[bold yellow]空白开卷题 (Blank Slate):[/bold yellow] {'是 (从头全量编写)' if pd.is_blank_slate else '否 (带模板/靶心骨架)'}",
                     f"[bold yellow]代码总字符数:[/bold yellow] {len(pd.code)}",
                 ]
                 if pd.requirements:
@@ -235,9 +237,10 @@ def cmd_submit_choice(args: argparse.Namespace) -> None:
     else:
         target_options = [o.strip() for o in raw_options.split(",") if o.strip()]
 
+    keyword = getattr(args, "match", None) or config.browser.target_domain
     try:
         with BrowserSession() as session:
-            page = session.get_target_page(config.browser.target_domain)
+            page = session.get_target_page(keyword, prefer_type="shixun")
             result = submit_choice_answer(page, target_options)
 
             if json_mode:
@@ -272,9 +275,10 @@ def cmd_submit_blank(args: argparse.Namespace) -> None:
     else:
         answers = [a.strip() for a in raw_answers.split(",") if a.strip()]
 
+    keyword = getattr(args, "match", None) or config.browser.target_domain
     try:
         with BrowserSession() as session:
-            page = session.get_target_page(config.browser.target_domain)
+            page = session.get_target_page(keyword, prefer_type="shixun")
             result = submit_blank_answer(page, answers)
 
             if json_mode:
@@ -321,9 +325,10 @@ def cmd_inject_code(args: argparse.Namespace) -> None:
 
     target_only = not args.full
 
+    keyword = getattr(args, "match", None) or config.browser.target_domain
     try:
         with BrowserSession() as session:
-            page = session.get_target_page(config.browser.target_domain)
+            page = session.get_target_page(keyword, prefer_type="shixun")
             result = inject_code(page, code_content, target_only=target_only)
 
             if json_mode:
@@ -350,9 +355,10 @@ def cmd_trigger_eval(args: argparse.Namespace) -> None:
     timeout = args.timeout or 60
     auto_next = args.auto_next
 
+    keyword = getattr(args, "match", None) or config.browser.target_domain
     try:
         with BrowserSession() as session:
-            page = session.get_target_page(config.browser.target_domain)
+            page = session.get_target_page(keyword, prefer_type="shixun")
             eval_mgr = EvaluationManager()
             result = eval_mgr.trigger_and_wait_eval(page, timeout_seconds=timeout)
 
@@ -430,9 +436,10 @@ def cmd_submit_terminal(args: argparse.Namespace) -> None:
     should_eval = getattr(args, "eval", False)
     timeout = getattr(args, "timeout", 60) or 60
 
+    keyword = getattr(args, "match", None) or config.browser.target_domain
     try:
         with BrowserSession() as session:
-            page = session.get_target_page(config.browser.target_domain)
+            page = session.get_target_page(keyword, prefer_type="shixun")
             dismiss_blocking_overlays(page)
 
             ok = inject_terminal_command(page, command, execute_enter=execute_enter)
@@ -508,9 +515,10 @@ def cmd_solve_cycle(args: argparse.Namespace) -> None:
     auto_next = args.auto_next
     min_duration = getattr(args, "min_duration", 60)
 
+    keyword = getattr(args, "match", None) or config.browser.target_domain
     try:
         with BrowserSession() as session:
-            page = session.get_target_page(config.browser.target_domain)
+            page = session.get_target_page(keyword, prefer_type="shixun")
             page_url = getattr(page, "url", None)
             task_id = str(page_url) if page_url else None
             result = run_solve_cycle(
@@ -522,6 +530,15 @@ def cmd_solve_cycle(args: argparse.Namespace) -> None:
                 min_duration=min_duration,
                 task_id=task_id,
             )
+
+            # 若评测通过且启用了 --close-on-complete，关闭当前关卡页
+            if result.get("passed") and getattr(args, "close_on_complete", False):
+                logger.info("关卡已通过且指定了 --close-on-complete，正在安全关闭当前关卡标签页...")
+                try:
+                    page.close()
+                    result["page_closed"] = True
+                except Exception as ce:
+                    logger.debug(f"关闭关卡页异常 (安全忽略): {ce}")
 
             if json_mode:
                 print_json_result(result)
@@ -543,6 +560,8 @@ def cmd_solve_cycle(args: argparse.Namespace) -> None:
                     panel_text.append("\n[bold red]⚠️ 连续 3 次相同报错，已触发熔断保护！[/bold red]")
                 if result.get("next_level_triggered"):
                     panel_text.append("\n[bold green]已成功流转至下一关！[/bold green]")
+                if result.get("page_closed"):
+                    panel_text.append("\n[bold green]已根据 --close-on-complete 安全关闭当前关卡标签页！[/bold green]")
 
                 console.print(
                     Panel(
@@ -562,7 +581,7 @@ def cmd_list_tasks(args: argparse.Namespace) -> None:
 
     try:
         with BrowserSession() as session:
-            page = session.get_target_page(keyword)
+            page = session.get_target_page(keyword, prefer_type="classroom")
             tasks = list_classroom_tasks(page)
             total = len(tasks)
             completed = sum(1 for t in tasks if t["is_completed"])
@@ -606,7 +625,7 @@ def cmd_open_task(args: argparse.Namespace) -> None:
 
     try:
         with BrowserSession() as session:
-            page = session.get_target_page(keyword)
+            page = session.get_target_page(keyword, prefer_type="classroom")
             res = open_classroom_task(page, index=index)
 
             # 开启大题成功后，调用 pacing_controller.start_task(task_url) 打卡
@@ -647,7 +666,7 @@ def cmd_run_classroom_homework(args: argparse.Namespace) -> None:
 
     try:
         with BrowserSession() as session:
-            page = session.get_target_page(keyword)
+            page = session.get_target_page(keyword, prefer_type="classroom")
             report = run_classroom_cruise(
                 page=page,
                 max_tasks=max_tasks,
@@ -713,16 +732,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_dump = subparsers.add_parser("dump-question", help="提取当前页面的题目数据与实训要求")
     p_dump.add_argument("-o", "--output", help="输出保存路径 (.json)")
     p_dump.add_argument("-t", "--type", help="强制指定题型 (choice, blank, practical 等)")
+    p_dump.add_argument("--match", "-m", help="指定目标页面的 URL 或标题匹配关键字")
     p_dump.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
     # 3. submit-choice
     p_choice = subparsers.add_parser("submit-choice", help="提交客观选择题/多选题/判断题")
     p_choice.add_argument("--options", required=True, help="目标选项列表，如 A 或 A,B 或 '[\"A\", \"B\"]'")
+    p_choice.add_argument("--match", "-m", help="指定目标页面的 URL 或标题匹配关键字")
     p_choice.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
     # 4. submit-blank
     p_blank = subparsers.add_parser("submit-blank", help="提交文本填空题答案")
     p_blank.add_argument("--answers", required=True, help="填空答案，如 '[\"ans1\", \"ans2\"]' 或 ans1,ans2")
+    p_blank.add_argument("--match", "-m", help="指定目标页面的 URL 或标题匹配关键字")
     p_blank.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
     # 5. inject-code
@@ -731,12 +753,14 @@ def build_parser() -> argparse.ArgumentParser:
     code_group.add_argument("--code", help="待注入的代码字符串")
     code_group.add_argument("--file", help="待注入的代码文件路径")
     p_code.add_argument("--full", action="store_true", help="全量替换代码，禁用 Begin-End 靶心保护组装")
+    p_code.add_argument("--match", "-m", help="指定目标页面的 URL 或标题匹配关键字")
     p_code.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
     # 6. trigger-eval
     p_eval = subparsers.add_parser("trigger-eval", help="点击评测并等待结果回执 (内置自愈熔断)")
     p_eval.add_argument("--timeout", type=int, default=60, help="最长评测等待超时 (秒，默认 60)")
     p_eval.add_argument("--auto-next", action="store_true", help="评测通过后自动点击‘下一关’")
+    p_eval.add_argument("--match", "-m", help="指定目标页面的 URL 或标题匹配关键字")
     p_eval.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
     # 7. submit-answer (综合命令，兼容 AGENTS.md 规范)
@@ -753,8 +777,10 @@ def build_parser() -> argparse.ArgumentParser:
     cycle_group.add_argument("--file", help="待注入的代码文件路径")
     p_cycle.add_argument("--full", action="store_true", help="全量替换代码，禁用 Begin-End 靶心保护组装")
     p_cycle.add_argument("--auto-next", action="store_true", help="评测通过后自动点击‘下一关’")
+    p_cycle.add_argument("--close-on-complete", action="store_true", help="关卡评测全部通过后自动关闭当前关卡标签页")
     p_cycle.add_argument("--timeout", type=int, default=60, help="最长评测等待超时 (秒，默认 60)")
     p_cycle.add_argument("--min-duration", type=int, default=60, help="单题防秒刷最小作答总时长 (秒，默认 60，设为 0 直出)")
+    p_cycle.add_argument("--match", "-m", help="指定目标页面的 URL 或标题匹配关键字")
     p_cycle.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
     # 9. submit-terminal (Web 终端执行)
@@ -764,6 +790,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_term.add_argument("--read", action="store_true", help="执行后读取屏幕输出")
     p_term.add_argument("--eval", action="store_true", help="执行后触发关卡评测监听")
     p_term.add_argument("--timeout", type=int, default=60, help="评测等待超时 (秒，默认 60)")
+    p_term.add_argument("--match", "-m", help="指定目标页面的 URL 或标题匹配关键字")
     p_term.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
     # 10. list-tasks / scan-classroom (只读扫描课堂大作业列表)

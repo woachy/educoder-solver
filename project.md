@@ -327,13 +327,14 @@ tou ge/
 | **Phase 4** | **防风控拟真与端到端自动化交付**<br>- 拟真随机微延迟<br>- 异常断线优雅提示<br>- 7 大子命令 CLI 与完整文档 | **已交付 (100%)** | CLI 支持人类彩色高亮与 Agent 纯净 JSON 双模式 |
 | **Phase 5** | **v2 架构演进与体验提速 (低熵提纯与单会话流水线)**<br>- `src/executor/pipeline.py` (单会话复合闭环流水线)<br>- `src/executor/diff_extractor.py` (高密度 Diff 提纯)<br>- `src/executor/modal_sweeper.py` (弹窗与遮罩清理)<br>- 两阶段防竞态监听与快照验证 | **已交付 (100%)** | 测试用例增至 88 个全部通过；单循环耗时从 30s 压缩至 5~8s；消除 DOM 杂音与弹窗遮挡 |
 | **Phase 6** | **v3 全自动课堂作业巡航与防秒刷控速体系**<br>- `src/executor/pacing.py` (智能打卡差额等待与保鲜心跳)<br>- `src/executor/classroom_orchestrator.py` (作业列表巡航与Tab管理)<br>- `src/extractor/practical.py` (Table2Markdown与多模态提纯)<br>- `src/executor/eval_action.py` (CDP 网络层拦截与双轨融合)<br>- `src/executor/editor_action.py` (Monaco Fiber 内存级穿透) | **已交付 (100%)** | 测试用例增至 106 个全部通过 (100%)；支持整门课作业全自动巡航通关；实现教师端审查防秒刷控速；彻底消灭竞态与键盘模拟回退 |
-| **Phase 7** | **v4.0 跨进程持久化、React Fiber 真实保存与跳板自动穿透**<br>- `.cache/pacing_state.json` (跨进程原子打卡与差额精确补足)<br>- `src/executor/editor_action.py` (React Fiber `onChange`/`onSave` 真实保存，提取 `commitID`，`Ctrl+S` 键盘双重兜底)<br>- `src/executor/classroom_orchestrator.py` (`penetrate_detail_springboard` 穿透详情页直达 IDE)<br>- 全局 `window.monaco || window.Monaco` 与 `.monaco-editor, .my-monaco-editor` 兼容 | **已交付 (100%)** | **测试用例增至 169 个全部通过 (100%)**；消灭短连接重复 60s+ 盲等；消灭评测云端代码为空致命缺陷；详情页一步直达 |
+| **Phase 7** | **v4.0 跨进程持久化、React Fiber 真实保存与跳板自动穿透**<br>- `.cache/pacing_state.json` (跨进程原子打卡与差额精确补足)<br>- `src/executor/editor_action.py` (React Fiber `onChange`/`onSave` 真实保存，提取 `commitID`，`Ctrl+S` 键盘双重兜底)<br>- `src/executor/classroom_orchestrator.py` (`penetrate_detail_springboard` 穿透详情页直达 IDE)<br>- 全局 `window.monaco || window.Monaco` 与 `.monaco-editor, .my-monaco-editor` 兼容 | **已交付 (100%)** | 测试用例增至 169 个全部通过 (100%)；消灭短连接重复 60s+ 盲等；消灭评测云端代码为空致命缺陷；详情页一步直达 |
+| **Phase 8** | **v4.1.0 标签页解耦、隐形字符高敏Diff、SPA防抖与生命周期回收**<br>- `src/browser/manager.py` (标签页场景智能解耦 `prefer_type='classroom'\|'shixun'`)<br>- `src/executor/diff_extractor.py` (隐形字符/行尾空格高敏识别与 repr 展开提示)<br>- `src/extractor/detector.py` (`wait_for_spa_loading` 异步加载态防抖自愈)<br>- `src/extractor/practical.py` (`is_blank_slate: true` 空白开卷题显式感知)<br>- `src/executor/classroom_orchestrator.py` (`cleanup_old_task_pages` 与 `--close-on-complete` 多Tab回收) | **已交付 (100%)** | **测试用例增至 192 个全部通过 (100%)**；消灭跨大题Tab抢占；消灭末尾空格判错误导；消灭SPA瞬态未知题型误报 |
 
 ---
 
 ## 6. 系统质量与工程检查规范验证 (Quality Audit)
 
-系统严格遵照工程交付标准，在 v4.0 演进后执行了全量验收：
+系统严格遵照工程交付标准，在 v4.1.0 演进后执行了全量验收：
 
 ### 6.1 静态语法与模块编译检查
 执行指令：`.\.venv\Scripts\python -m compileall src scripts tests`
@@ -341,23 +342,23 @@ tou ge/
 
 ### 6.2 自动化测试套件 (Pytest)
 执行指令：`.\.venv\Scripts\python -m pytest -v`
-- **用例总数**：**169 个测试用例 (100% 通过，耗时约 10.94s)**
+- **用例总数**：**192 个测试用例 (100% 通过，耗时约 14.01s)**
 - **各模块测试明细**：
-  - `test_browser.py` (10 tests): CDP 在线/离线探活、标签页路由、保留物理标签页安全退出、指数退避重试
-  - `test_classroom_orchestrator.py` (14 tests): 课堂作业卡片扫描、完成状态判定、单步开启、详情跳板页自动穿透、生命周期巡航与报表生成
-  - `test_cli.py` (25 tests): 命令行参数解析、`list-tasks`, `open-task`, `run-classroom-homework` 与 `--min-duration` 参数及 `--json` 契约
+  - `test_browser.py` (16 tests): CDP 在线/离线探活、标签页智能解耦定向路由 (`prefer_type`)、旧Tab安全清理、保留物理标签页安全退出、指数退避重试
+  - `test_classroom_orchestrator.py` (15 tests): 课堂作业卡片扫描、完成状态判定、单步开启、详情跳板页自动穿透、开启后旧Tab自动回收、生命周期巡航与报表生成
+  - `test_cli.py` (31 tests): 命令行参数解析、`list-tasks`, `open-task`, `run-classroom-homework`、`solve-cycle --close-on-complete`、定向路由与 `--min-duration` 参数及 `--json` 契约
   - `test_config.py` (2 tests): 默认参数与环境变量注入
   - `test_delay.py` (4 tests): 同步与异步随机拟真微延迟
-  - `test_diff_extractor.py` (12 tests): ANSI 转义清理、HTML 实体解析、预期/实际对比提取、diff 提示生成
+  - `test_diff_extractor.py` (14 tests): ANSI 转义清理、HTML 实体解析、隐形字符/行尾空格高敏识别、逐行末尾空格高亮、预期/实际对比提取
   - `test_executor.py` (20 tests): 防反选逻辑、填空事件分发、代码备份、Monaco/Fiber 内存注入、React Fiber `onSave` 与 `commitID` 提取、`Ctrl+S` 兜底、连续 3 次相同报错熔断、弹窗关闭、下一关
-  - `test_extractor.py` (29 tests): 自动探测题型、客观题/填空题提取、SQL 方言识别（MySQL, SQL Server, PostgreSQL, Oracle）、实训题 Begin-End 多语言切分算法无损验证
+  - `test_extractor.py` (37 tests): 自动探测题型、SPA 加载态防抖自愈 (`wait_for_spa_loading`)、空白开卷题显式感知 (`is_blank_slate`)、客观题/填空题提取、SQL 方言识别（MySQL, SQL Server, PostgreSQL, Oracle）、实训题 Begin-End 多语言切分算法无损验证
   - `test_logger.py` (3 tests): 终端着色与静默 JSON 输出
   - `test_pacing.py` (6 tests): 开题打卡、差额等待计算、快速自测传0放行、保活心跳注入
-  - `test_pacing_persistence.py` (17 tests): [v4.0] 开题打卡跨进程持久化、缓存读取写入、URL 规范化、失效清除与通关清理
+  - `test_pacing_persistence.py` (17 tests): 开题打卡跨进程持久化、缓存读取写入、URL 规范化、失效清除与通关清理
   - `test_pipeline.py` (8 tests): 复合答题流水线闭环、注入失败阻断、自动流转下一关、控速联动与耗时统计
   - `test_table_extractor.py` (5 tests): 题干 HTML `<table>` 转换为 Markdown 表格及多模态图片提纯验证
   - `test_terminal_action.py` (14 tests): 命令行终端模拟交互与 xterm 剪贴板注入测试
-- **测试评价**：**169 passed in 10.94s (通过率 100%)**
+- **测试评价**：**192 passed in 14.01s (通过率 100%)**
 
 ### 6.3 CLI 运行时 Dry-Run 校验
 - `python -m src.cli --help`：覆盖全部子命令，说明完整清晰。

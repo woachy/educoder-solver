@@ -1,8 +1,8 @@
 # 头歌自动答题系统 - 面向 AI 代理的操作手册 (AI Manual)
 
-> **版本**：v4.0.0  
+> **版本**：v4.1.0  
 > **适用对象**：本地大型语言模型 / Agentic AI（如 Antigravity、Claude Code、Cursor 等本地执行代理）  
-> **核心原则**：纯本地推理、零商业 API 依赖、真机 CDP 拟真交互、防秒刷跨进程持久化控速、React Fiber 真实保存、低熵提纯、大作业自动化巡航 (含跳板详情页自动穿透)、防封号防死循环
+> **核心原则**：纯本地推理、零商业 API 依赖、真机 CDP 拟真交互、防秒刷跨进程持久化控速、React Fiber 真实保存、低熵提纯、大作业自动化巡航 (含跳板详情页自动穿透与多 Tab 自动生命周期回收)、标签页智能定向解耦 (prefer_type: classroom/shixun)、防封号防死循环
 
 ---
 
@@ -205,13 +205,20 @@ Windows 推荐执行命令前缀：`.\.venv\Scripts\python -m src.cli`
     "suffix_code": "########## End ##########\n",
     "language": "sql",
     "has_target_marker": true,
-    "editor_type": "monaco"
+    "editor_type": "monaco",
+    "is_blank_slate": false
   }
 }
 ```
 
 > **Table2Markdown 关键收益**：
 > 题干中的数据表已被完整转换为 Markdown 表格（如 `| 字段名 | 数据类型 | 约束条件 |`），图片被替换为结构化标注 `[附图说明: xxx]`，**绝无 base64 乱码污染**，你只需专注于推演 SQL 或算法。
+
+> **空白开卷题显式感知 (Blank Slate)**：
+> 若 `practical_details.is_blank_slate == true`，表示该实训题未提供任何初始代码骨架（如全白纸算法开发），提示 AI Agent 必须从头全量编写完整代码（配合 `solve-cycle --full` 或全量注入），而不是仅填补局部靶心。
+
+> **SPA 加载态防抖自愈 (SPA Loading Debounce)**：
+> 关卡提取入口内置 `wait_for_spa_loading` 防抖自愈等待（默认 3.5s），自动检测“努力请求数据中”及 `.ldsRing`、`.ant-spin-spinning` 等异步遮罩，等待其消失且容器挂载完成，彻底杜绝关卡切换瞬间将页面误判为 `unknown`。
 
 > **实训题智能开题打卡机制 (Smart Clock-in)**：
 > 当识别到题目为代码实训题（`practical`）且当前关卡在 `.cache/pacing_state.json` 中尚未打卡时，CLI 会自动记录当前关卡开题时间戳。即便未走 `open-task` 而是用户/Agent 直接切入关卡进行感知，控速器也能精确捕捉到开题起点，杜绝后续 `solve-cycle` 误判为刚刚开题。
@@ -229,23 +236,27 @@ Windows 推荐执行命令前缀：`.\.venv\Scripts\python -m src.cli`
 # 全量替换代码并在全绿后自动点击“下一关”
 .\.venv\Scripts\python -m src.cli solve-cycle --file "solution.sql" --full --auto-next --min-duration 60 --json
 
+# 通关后自动关闭当前关卡标签页 (v4.1 支持)
+.\.venv\Scripts\python -m src.cli solve-cycle --code "SELECT 1;" --close-on-complete --json
+
 # 快速自测模式 (min-duration 0 直出放行)
 .\.venv\Scripts\python -m src.cli solve-cycle --code "SELECT * FROM tb_emp;" --min-duration 0 --json
 ```
 
-#### JSON 输出契约 (高密度低熵，含 v4.0 保存回执)
+#### JSON 输出契约 (高密度低熵，含 v4.1 保存与回收回执)
 ```json
 {
   "success": true,
-  "passed": false,
-  "pass_ratio": "0/1",
+  "passed": true,
+  "pass_ratio": "1/1",
   "expected": "sno char(10) PRI",
-  "actual": "sno varchar(10) PRI",
-  "diff_hint": "第 1 行内容不匹配: 预期包含 'char(10)' vs 实际 'varchar(10)'",
+  "actual": "sno char(10) PRI",
+  "diff_hint": "全部通过 (1/1)",
   "stdout_msg": "",
-  "error_msg": "AssertionError: column type mismatch",
+  "error_msg": "",
   "circuit_broken": false,
   "next_level_triggered": false,
+  "page_closed": true,
   "overlays_dismissed": 1,
   "elapsed_seconds": 64.12,
   "injection": {
@@ -256,17 +267,19 @@ Windows 推荐执行命令前缀：`.\.venv\Scripts\python -m src.cli`
     "saved": true,
     "commit_id": "commit_a1b2c3d4e5f6"
   },
-  "message": "评测未通过 (通过率: 0/1)"
+  "message": "评测通过 (通过率: 1/1)"
 }
 ```
 
-> **v4.0 核心机制攻关点**：
+> **v4.0 & v4.1 核心机制攻关点**：
 > 1. **React SPA 深度 Fiber 穿透与双重保存保障**：
 >    头歌现代前端为 React SPA。仅调用 Monaco 的 `setValue` 只修改了浏览器内存中的编辑器 Model，不会同步 React 组件 State，导致后台拉取到的仍是空代码或初始模板。v4.0 深度穿透 React Fiber (`__reactFiber$`, `__reactInternalInstance$`)，显式调用 `ed.onChange(val)` 通知 React 更新 State，随后调用 `ed.onSave(1)` 触发向后端提交 Git Commit 并获取 `commitID`；若组件未提供 `onSave`，自动模拟 `Control+S` 键盘快捷键并留出网络微延迟进行双重兜底，确保云端代码 100% 同步！
 > 2. **智能防秒刷控速跨进程持久化**：
 >    开题时间戳持久化存储于 `.cache/pacing_state.json`，`solve-cycle` 启动时读取并精确扣减已耗时（若 AI 推演与提取已用 40s，基准 60s 仅需等待 20s+ 抖动；若已超时则 0 秒极速放行），通关时自动清理当前关卡打卡记录。彻底消灭短连接模式下每题重复盲等 60s+（长达 75s+）的冗余等待。
 > 3. **Monaco 全局大小写与容器类名兼容**：
 >    支持 `window.monaco || window.Monaco`，并适配 `.monaco-editor, .my-monaco-editor` 等多种容器变体。
+> 4. **标签页智能定向解耦与生命周期自动回收 (v4.1)**：
+>    CLI 所有命令底层接入 `prefer_type` 智能路由器：`list-tasks` / `open-task` 默认锁定 `prefer_type="classroom"`（优先匹配作业列表页）；`dump-question` / `solve-cycle` 等解题命令默认锁定 `prefer_type="shixun"`（优先匹配关卡作答页），彻底根治多 Tab 并存时目标页抢占混淆。同时 `open_classroom_task` 在开启新题后自动调用 `cleanup_old_task_pages` 回收遗留的旧关卡 Tab，配合 `solve-cycle --close-on-complete` 实现标签页零残留与内存零泄露。
 
 ---
 
@@ -379,4 +392,5 @@ Windows 推荐执行命令前缀：`.\.venv\Scripts\python -m src.cli`
 | `submit-choice` 未能成功勾选 | 选项标识匹配异常（题干使用特殊序号或带括号） | 从 `dump-question` 返回的 `options` 中提取确切的 `id` 或文本重新尝试 |
 | `solve-cycle` 报错提示超时 | 头歌后台排队评测中或代码中含有死循环 | 检查代码是否存在死循环；超时后先 `dump-question` 观察状态 |
 | 评测出现指针拦截错误 (`intercepts pointer events`) | 平台弹出通关庆祝模态框未完全关闭 | 底层 `ModalSweeper` 会自动扫除；若仍出现，提示用户手动在物理浏览器上点击关闭 |
+| 答题过程中标签页堆积 / 关卡页抢占作业列表扫描 | 多大题流转时旧关卡 Tab 未及时释放导致定位混淆与内存膨胀 | v4.1 已原生集成智能解耦与自动回收：列表命令锁定 `prefer_type="classroom"`，做题命令锁定 `prefer_type="shixun"`；`open-task` 自动回收旧关卡 Tab，`solve-cycle` 支持 `--close-on-complete` 通关即关 |
 

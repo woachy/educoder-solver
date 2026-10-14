@@ -98,6 +98,15 @@ class TestCliParser:
         assert args.match == "classrooms/123"
         assert args.json is True
 
+    def test_parser_solve_cycle_flags(self):
+        parser = build_parser()
+        args = parser.parse_args(["solve-cycle", "--code", "print(1)", "--close-on-complete", "--match", "shixun", "--json"])
+        assert args.command == "solve-cycle"
+        assert args.code == "print(1)"
+        assert args.close_on_complete is True
+        assert args.match == "shixun"
+        assert args.json is True
+
 
 class TestCliExecution:
     """测试各子命令执行与 --json 结构化输出"""
@@ -355,4 +364,91 @@ class TestCliExecution:
             assert data["status"] == "success"
             assert data["task_index"] == 1
             assert data["task_title"] == "任务二"
+
+    def test_cmd_solve_cycle_close_on_complete_passed(self, capsys):
+        """测试 solve-cycle --close-on-complete 在通过时安全关闭关卡标签页"""
+        mock_page = MagicMock()
+        mock_session = MagicMock()
+        mock_session.get_target_page.return_value = mock_page
+
+        fake_result = {
+            "success": True,
+            "passed": True,
+            "pass_ratio": "1/1",
+            "message": "全部通过",
+        }
+
+        with patch("src.cli.BrowserSession") as mock_session_cls, \
+             patch("src.cli.run_solve_cycle", return_value=fake_result):
+            mock_session_cls.return_value.__enter__.return_value = mock_session
+
+            main(["solve-cycle", "--code", "print(1)", "--close-on-complete", "--json"])
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+
+            assert data["passed"] is True
+            assert data["page_closed"] is True
+            mock_page.close.assert_called_once()
+            mock_session.get_target_page.assert_called_once_with("educoder.net", prefer_type="shixun")
+
+    def test_cmd_solve_cycle_close_on_complete_failed(self, capsys):
+        """测试 solve-cycle --close-on-complete 在未通过时保持页面不关闭以供排错"""
+        mock_page = MagicMock()
+        mock_session = MagicMock()
+        mock_session.get_target_page.return_value = mock_page
+
+        fake_result = {
+            "success": True,
+            "passed": False,
+            "pass_ratio": "0/1",
+            "message": "评测未通过",
+        }
+
+        with patch("src.cli.BrowserSession") as mock_session_cls, \
+             patch("src.cli.run_solve_cycle", return_value=fake_result):
+            mock_session_cls.return_value.__enter__.return_value = mock_session
+
+            main(["solve-cycle", "--code", "print(1)", "--close-on-complete", "--json"])
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+
+            assert data["passed"] is False
+            assert "page_closed" not in data
+            mock_page.close.assert_not_called()
+
+    def test_cmd_list_tasks_calls_prefer_classroom(self, capsys):
+        """测试 list-tasks 定向匹配 prefer_type='classroom'"""
+        mock_session = MagicMock()
+        with patch("src.cli.BrowserSession") as mock_session_cls, \
+             patch("src.cli.list_classroom_tasks", return_value=[]):
+            mock_session_cls.return_value.__enter__.return_value = mock_session
+            main(["list-tasks", "--json"])
+            mock_session.get_target_page.assert_called_once_with("educoder.net", prefer_type="classroom")
+
+    def test_cmd_open_task_calls_prefer_classroom(self, capsys):
+        """测试 open-task 定向匹配 prefer_type='classroom'"""
+        mock_session = MagicMock()
+        with patch("src.cli.BrowserSession") as mock_session_cls, \
+             patch("src.cli.open_classroom_task", return_value={"status": "error", "message": "none"}):
+            mock_session_cls.return_value.__enter__.return_value = mock_session
+            main(["open-task", "--json"])
+            mock_session.get_target_page.assert_called_once_with("educoder.net", prefer_type="classroom")
+
+    def test_cmd_dump_question_calls_prefer_shixun(self, capsys):
+        """测试 dump-question 定向匹配 prefer_type='shixun'"""
+        mock_session = MagicMock()
+        mock_page = MagicMock()
+        mock_page.url = "http://educoder.net/tasks/1"
+        mock_session.get_target_page.return_value = mock_page
+
+        mock_q = MagicMock()
+        mock_q.type = QuestionType.CHOICE
+        mock_q.title = "选择题"
+        mock_q.to_dict.return_value = {"title": "选择题"}
+
+        with patch("src.cli.BrowserSession") as mock_session_cls, \
+             patch("src.cli.extract_question", return_value=mock_q):
+            mock_session_cls.return_value.__enter__.return_value = mock_session
+            main(["dump-question", "--json"])
+            mock_session.get_target_page.assert_called_once_with("educoder.net", prefer_type="shixun")
 

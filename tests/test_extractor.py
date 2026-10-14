@@ -22,7 +22,11 @@ from src.extractor.base import (
 )
 from src.extractor.blank import BlankExtractor
 from src.extractor.choice import ChoiceExtractor
-from src.extractor.detector import detect_question_type, extract_question
+from src.extractor.detector import (
+    detect_question_type,
+    extract_question,
+    wait_for_spa_loading,
+)
 from src.extractor.practical import PracticalExtractor
 from tests.fixtures.html_samples import (
     BLANK_HTML,
@@ -201,6 +205,62 @@ class TestPracticalExtractor:
         assert "dynamic_code" in details.code
         assert details.has_target_marker is True
         assert details.prefix_code + details.target_code + details.suffix_code == details.code
+        assert details.is_blank_slate is False
+
+    def test_extract_practical_blank_slate_js(self):
+        """测试当 Monaco 编辑器代码为空白时，正确识别为空白开卷题 (Blank Slate)"""
+        mock_page = MagicMock()
+        mock_page.content.return_value = PRACTICAL_HTML
+
+        def mock_eval(script):
+            if "is_loading" in script:
+                return {"is_loading": False, "has_content": True}
+            if "getModels" in script or "monacoEditor" in script:
+                return {
+                    "code": "   \n  \t ",
+                    "language": "python",
+                    "editor_type": "monaco",
+                }
+            if "window.monaco" in script or "has_editor" in script:
+                return True
+            return {"code": "   \n  \t ", "language": "python", "editor_type": "monaco"}
+
+        mock_page.evaluate.side_effect = mock_eval
+
+        extractor = PracticalExtractor()
+        data = extractor.extract(mock_page)
+
+        assert data.type == QuestionType.PRACTICAL
+        assert data.practical_details is not None
+        assert data.practical_details.is_blank_slate is True
+        assert data.metadata.get("is_blank_slate") is True
+        assert data.to_dict()["practical_details"]["is_blank_slate"] is True
+
+    def test_extract_practical_blank_slate_html(self):
+        """测试 HTML 静态结构中空 Monaco 容器识别为空白开卷题"""
+        html = (
+            "<div class='shixun-left'><div class='task-description'>请编写从头实现的排序算法</div></div>"
+            "<div class='monaco-editor'><div class='view-lines'></div></div>"
+        )
+        extractor = PracticalExtractor()
+        data = extractor.extract(html)
+
+        assert data.type == QuestionType.PRACTICAL
+        assert data.practical_details is not None
+        assert data.practical_details.is_blank_slate is True
+        assert data.metadata.get("is_blank_slate") is True
+        assert data.to_dict()["practical_details"]["is_blank_slate"] is True
+
+    def test_extract_practical_non_blank_slate(self):
+        """测试有初始代码模板的实训题，is_blank_slate 为 False"""
+        extractor = PracticalExtractor()
+        data = extractor.extract(PRACTICAL_HTML)
+
+        assert data.type == QuestionType.PRACTICAL
+        assert data.practical_details is not None
+        assert data.practical_details.is_blank_slate is False
+        assert data.to_dict()["practical_details"]["is_blank_slate"] is False
+
 
 
 class TestBeginEndSplitter:
@@ -371,6 +431,7 @@ class TestQuestionDataSerialization:
             suffix_code="s_",
             language="python",
             has_target_marker=True,
+            is_blank_slate=True,
         )
 
         q_data = QuestionData(
@@ -387,6 +448,7 @@ class TestQuestionDataSerialization:
         assert dict_output["type"] == "choice"
         assert len(dict_output["options"]) == 1
         assert dict_output["options"][0]["id"] == "A"
+        assert dict_output["practical_details"]["is_blank_slate"] is True
 
         json_str = q_data.to_json()
         parsed = json.loads(json_str)
@@ -396,6 +458,7 @@ class TestQuestionDataSerialization:
         assert parsed["options"][0]["text"] == "选项一"
         assert parsed["blanks"][0]["current_value"] == "值"
         assert parsed["practical_details"]["language"] == "python"
+        assert parsed["practical_details"]["is_blank_slate"] is True
 
     def test_unified_extract_question_entry(self):
         """测试统一提取入口 extract_question"""
@@ -406,6 +469,63 @@ class TestQuestionDataSerialization:
         data_blank = extract_question(BLANK_HTML)
         assert data_blank.type == QuestionType.BLANK
         assert len(data_blank.blanks) == 2
+
+
+class TestSpaLoadingDetector:
+    """测试 SPA 加载态防抖自愈机制"""
+
+    def test_wait_for_spa_loading_when_recovering(self):
+        """测试页面处于加载态并在轮询中自愈恢复"""
+        mock_page = MagicMock()
+        mock_page.evaluate.side_effect = [
+            {"is_loading": True, "has_content": False},
+            {"is_loading": True, "has_content": False},
+            {"is_loading": False, "has_content": True},
+        ]
+
+        ready = wait_for_spa_loading(mock_page, timeout=1.0, poll_interval=0.05)
+        assert ready is True
+        assert mock_page.evaluate.call_count == 3
+
+    def test_wait_for_spa_loading_timeout(self):
+        """测试页面持续处于加载态直至超时"""
+        mock_page = MagicMock()
+        mock_page.evaluate.return_value = {"is_loading": True, "has_content": False}
+
+        ready = wait_for_spa_loading(mock_page, timeout=0.15, poll_interval=0.05)
+        assert ready is False
+        assert mock_page.evaluate.call_count >= 2
+
+    def test_wait_for_spa_loading_not_loading(self):
+        """测试页面未处于加载态时直接返回 True"""
+        mock_page = MagicMock()
+        mock_page.evaluate.return_value = {"is_loading": False, "has_content": True}
+
+        ready = wait_for_spa_loading(mock_page, timeout=1.0, poll_interval=0.05)
+        assert ready is True
+        assert mock_page.evaluate.call_count == 1
+
+    def test_wait_for_spa_loading_non_page_object(self):
+        """测试普通 HTML 字符串或不支持 evaluate 的对象直接放行"""
+        assert wait_for_spa_loading("<div>html</div>") is True
+        assert wait_for_spa_loading(None) is True
+
+    def test_extract_question_invokes_spa_loading_wait(self):
+        """测试 extract_question 入口会优先触发加载态防抖等待"""
+        mock_page = MagicMock()
+        mock_page.content.return_value = SINGLE_CHOICE_HTML
+
+        def mock_eval(script):
+            if "is_loading" in script:
+                return {"is_loading": False, "has_content": True}
+            return False
+
+        mock_page.evaluate.side_effect = mock_eval
+
+        data = extract_question(mock_page)
+        assert data.type == QuestionType.CHOICE
+        assert mock_page.evaluate.called
+
 
 
 class TestPlaywrightIntegration:

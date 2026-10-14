@@ -126,6 +126,28 @@ class PracticalExtractor(BaseExtractor):
         if db_dialect:
             desc = f"> [!NOTE] 经检测本关卡数据库方言为: {db_dialect}\n\n{desc}"
 
+        # 6. 空白代码题 (Blank Slate) 显式感知:
+        # 若代码经过提取后为空字符串或全空白（not code.strip()），且页面上确实存在 Monaco/Ace 编辑器（has_editor == True），判定为白纸题
+        has_editor = False
+        if hasattr(page_or_html, "evaluate") and callable(page_or_html.evaluate):
+            try:
+                has_editor = bool(page_or_html.evaluate(
+                    "() => !!(((window.monaco || window.Monaco) && (window.monaco || window.Monaco).editor) || window.ace || document.querySelector('.monaco-editor, .my-monaco-editor, .ace_editor, #monaco-editor, .code-editor'))"
+                ))
+            except Exception:
+                has_editor = False
+
+        if not has_editor:
+            for sel in [".monaco-editor", ".my-monaco-editor", ".ace_editor", "#monaco-editor", ".code-editor", ".shixun-editor"]:
+                if soup.select(sel):
+                    has_editor = True
+                    break
+
+        if not has_editor and editor_type in ("monaco", "ace"):
+            has_editor = True
+
+        is_blank_slate = bool(has_editor and (not code or not code.strip()))
+
         practical_details = PracticalDetails(
             task_description=desc,
             requirements=left_sections.get("requirements", ""),
@@ -138,6 +160,7 @@ class PracticalExtractor(BaseExtractor):
             language=language,
             has_target_marker=has_marker,
             editor_type=editor_type,
+            is_blank_slate=is_blank_slate,
         )
 
         metadata = {
@@ -145,6 +168,7 @@ class PracticalExtractor(BaseExtractor):
             "language": language,
             "editor_type": editor_type,
             "code_length": len(code),
+            "is_blank_slate": is_blank_slate,
         }
         if db_dialect:
             metadata["db_dialect"] = db_dialect

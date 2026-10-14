@@ -62,6 +62,7 @@ class PracticalDetails:
     language: str = ""                    # 编程语言 (python, c, cpp, java, sql 等)
     has_target_marker: bool = False       # 是否检测到 Begin-End 区域标记
     editor_type: str = "monaco"           # 编辑器类型: monaco / ace / textarea
+    is_blank_slate: bool = False          # 是否为完全无初始模板、需从头编写的空白开卷题
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

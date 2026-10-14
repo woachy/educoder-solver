@@ -11,7 +11,7 @@ from src.extractor.base import (
 )
 from src.extractor.blank import BlankExtractor
 from src.extractor.choice import ChoiceExtractor
-from src.extractor.detector import detect_question_type, extract_question
+from src.extractor.detector import detect_question_type, extract_question, wait_for_spa_loading
 from src.extractor.practical import PracticalExtractor
 
 __all__ = [
@@ -27,4 +27,5 @@ __all__ = [
     "detect_question_type",
     "extract_question",
     "get_page_html",
+    "wait_for_spa_loading",
 ]

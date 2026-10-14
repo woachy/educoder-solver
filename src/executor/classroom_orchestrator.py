@@ -183,6 +183,54 @@ def penetrate_detail_springboard(page: Page, context: Any = None) -> Page:
     return page
 
 
+def cleanup_old_task_pages(current_page: Page) -> int:
+    """清理除当前活动关卡页面外的冗余旧关卡标签页 (/tasks/ 或 /shixuns/)。
+
+    在打开新关卡后调用，自动释放已完成的旧关卡 Tab，防止标签页堆积占用内存并避免标签页混淆。
+    注意：绝对保留课堂作业列表页 (/shixun_homework, /homeworks) 与当前活动页。
+
+    Args:
+        current_page: 当前保持活动的关卡页面
+
+    Returns:
+        int: 关闭的旧关卡标签页数量
+    """
+    if not current_page:
+        return 0
+
+    context = getattr(current_page, "context", None)
+    if not context:
+        return 0
+
+    pages = getattr(context, "pages", [])
+    if not isinstance(pages, list):
+        return 0
+
+    closed_count = 0
+    for p in list(pages):
+        if p == current_page:
+            continue
+        try:
+            u = getattr(p, "url", "") or ""
+            u_lower = u.lower()
+            is_task_url = "/tasks/" in u_lower or "/shixuns/" in u_lower
+            is_homework_list = "/shixun_homework" in u_lower or "/homeworks" in u_lower
+            if is_task_url and not is_homework_list:
+                try:
+                    title_text = p.title() if callable(getattr(p, "title", None)) else ""
+                except Exception:
+                    title_text = ""
+                logger.info(f"清理冗余关卡标签页: [{title_text}]({u})")
+                p.close()
+                closed_count += 1
+        except Exception as e:
+            logger.debug(f"关闭旧关卡标签页异常 (安全忽略): {e}")
+
+    if closed_count > 0:
+        logger.info(f"已自动回收 {closed_count} 个冗余关卡标签页")
+    return closed_count
+
+
 def scan_classroom_tasks(page: Page) -> List[Dict[str, Any]]:
     """扫描课堂实训作业列表页，提取所有大题卡片与状态。
 
@@ -374,6 +422,9 @@ def open_classroom_task(page: Page, index: Optional[int] = None) -> Dict[str, An
 
     # 自动穿透跳板详情页 (/detail 或无 Monaco 页面)
     task_page = penetrate_detail_springboard(task_page, context)
+
+    # 自动清理此前已通关残留的旧关卡 Tab
+    cleanup_old_task_pages(task_page)
 
     # 预感知第一关
     q_data = extract_question(task_page)

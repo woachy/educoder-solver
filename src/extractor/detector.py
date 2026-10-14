@@ -6,6 +6,7 @@
 - 对外输出标准化统一结构 QuestionData
 """
 
+import time
 from typing import Any, Optional
 from bs4 import BeautifulSoup
 
@@ -79,6 +80,153 @@ def detect_question_type(page_or_html: Any) -> QuestionType:
     return QuestionType.UNKNOWN
 
 
+def wait_for_spa_loading(page_or_html: Any, timeout: float = 3.5, poll_interval: float = 0.3) -> bool:
+    """SPA 页面加载态防抖自愈等待。
+
+    检测页面是否包含加载文案（如“努力请求数据中”、“努力加载中”、“正在努力加载”）
+    或加载类名选择器（如 .ldsRing___mpBZC, [class*='ldsRing'], [class*='loading'], .ant-spin-spinning）。
+    若检测到加载中，循环等待至加载指示器消失且题目容器/编辑器呈现，最多等待 timeout 秒。
+
+    Args:
+        page_or_html: Playwright Page 实例、Mock 对象或 HTML 字符串
+        timeout: 最长等待超时时间（秒，默认 3.5 秒）
+        poll_interval: 轮询等待间隔（秒，默认 0.3 秒）
+
+    Returns:
+        bool: True 表示页面已就绪（未处于加载态或加载已完成呈现内容），False 表示超时仍处于加载态
+    """
+    if not hasattr(page_or_html, "evaluate") or not callable(page_or_html.evaluate):
+        return True
+
+    js_detect_loading = """
+    () => {
+        try {
+            const body = document.body;
+            const text = body ? (body.innerText || body.textContent || "") : "";
+            const loadingTexts = ["努力请求数据中", "努力加载中", "正在努力加载"];
+            const hasLoadingText = loadingTexts.some(t => text.includes(t));
+
+            const loadingSelectors = [
+                ".ldsRing___mpBZC",
+                "[class*='ldsRing']",
+                "[class*='loading']",
+                ".ant-spin-spinning"
+            ];
+            let hasLoadingEl = false;
+            for (const sel of loadingSelectors) {
+                const els = document.querySelectorAll(sel);
+                for (const el of els) {
+                    const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+                    if (!style || (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0')) {
+                        hasLoadingEl = true;
+                        break;
+                    }
+                }
+                if (hasLoadingEl) break;
+            }
+
+            const isLoading = hasLoadingText || hasLoadingEl;
+
+            // 检查题目容器或编辑器是否已呈现
+            const contentSelectors = [
+                ".monaco-editor",
+                ".my-monaco-editor",
+                ".ace_editor",
+                "#monaco-editor",
+                ".shixun-left",
+                ".task-description",
+                ".task-content",
+                "#task-content",
+                ".markdown-body",
+                ".subject-item",
+                ".question-item",
+                ".choice-item",
+                ".exercise-item",
+                ".ant-radio-group",
+                ".ant-checkbox-group",
+                ".choice-option",
+                ".blank-item",
+                "textarea.editor-input"
+            ];
+            let hasContent = false;
+            for (const sel of contentSelectors) {
+                const el = document.querySelector(sel);
+                if (el) {
+                    const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+                    if (!style || (style.display !== 'none' && style.visibility !== 'hidden')) {
+                        hasContent = true;
+                        break;
+                    }
+                }
+            }
+
+            const hasMonaco = !!(((window.monaco || window.Monaco) && (window.monaco || window.Monaco).editor && (window.monaco || window.Monaco).editor.getModels && (window.monaco || window.Monaco).editor.getModels().length > 0));
+            if (hasMonaco) {
+                hasContent = true;
+            }
+
+            return {
+                is_loading: isLoading,
+                has_content: hasContent
+            };
+        } catch (e) {
+            return { is_loading: false, has_content: true };
+        }
+    }
+    """
+
+    start_time = time.time()
+    try:
+        status = page_or_html.evaluate(js_detect_loading)
+    except Exception as e:
+        logger.debug(f"wait_for_spa_loading 初始探查异常: {e}")
+        return True
+
+    is_loading = False
+    has_content = True
+    if isinstance(status, dict):
+        is_loading = status.get("is_loading", False)
+        has_content = status.get("has_content", False)
+    elif isinstance(status, bool):
+        is_loading = status
+        has_content = not status
+
+    if not is_loading:
+        return True
+
+    logger.info("检测到 SPA 关卡正在异步加载数据，启动加载态防抖自愈等待...")
+    while (time.time() - start_time) < timeout:
+        if hasattr(page_or_html, "wait_for_timeout") and callable(page_or_html.wait_for_timeout):
+            try:
+                page_or_html.wait_for_timeout(int(poll_interval * 1000))
+            except Exception:
+                time.sleep(poll_interval)
+        else:
+            time.sleep(poll_interval)
+
+        try:
+            status = page_or_html.evaluate(js_detect_loading)
+            if isinstance(status, dict):
+                is_loading = status.get("is_loading", False)
+                has_content = status.get("has_content", False)
+            elif isinstance(status, bool):
+                is_loading = status
+                has_content = not status
+
+            if not is_loading and has_content:
+                logger.info("SPA 加载指示器已消失且题目内容容器已呈现，加载态防抖等待完成")
+                return True
+            if not is_loading:
+                logger.info("SPA 加载指示器已消失，加载态防抖等待完成")
+                return True
+        except Exception as e:
+            logger.debug(f"wait_for_spa_loading 轮询探查异常: {e}")
+            break
+
+    logger.warning(f"SPA 加载态防抖等待超过 {timeout} 秒，强制放行继续尝试提取")
+    return False
+
+
 def extract_question(page_or_html: Any, force_type: Optional[QuestionType] = None) -> QuestionData:
     """统一题目提取入口。
 
@@ -91,6 +239,9 @@ def extract_question(page_or_html: Any, force_type: Optional[QuestionType] = Non
     Returns:
         QuestionData: 结构化题目数据模型
     """
+    if hasattr(page_or_html, "evaluate") and callable(page_or_html.evaluate):
+        wait_for_spa_loading(page_or_html)
+
     target_type = force_type or detect_question_type(page_or_html)
 
     if target_type in (QuestionType.CHOICE, QuestionType.MULTIPLE_CHOICE, QuestionType.JUDGMENT):

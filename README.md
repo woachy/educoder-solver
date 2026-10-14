@@ -22,7 +22,8 @@
 - **防秒刷智能思考控速跨进程持久化 (Anti-Cheat Pacing & Persistence)**：内置智能开题打卡与跨进程持久化缓存（`.cache/pacing_state.json`），精准扣减已耗时（默认 60s 离散随机抖动），消灭短连接重复 60s+ 盲等，等待期间注入微滚动保活心跳，彻底规避教师端审计与平台刷题风控。
 - **课堂作业推进双模式与跳板详情页自动穿透**：支持面向整门课作业列表时的单步原子流（`list-tasks` 扫描列表 -> `open-task` 开启大题）与长连接交互式巡航（`run-classroom-homework`），底层自动穿透 `/detail?tabs=` 跳板介绍页直达 IDE 关卡。
 - **题干结构化与低熵提纯**：自动将题干中复杂的 HTML `<table>` 转换为 Markdown 表格，深度提纯测试集比对结果，过滤 DOM 与 ANSI 杂音；具备连续相同报错主动熔断机制。
-- **全局 Monaco 兼容与高鲁棒性工程基线**：全面兼容 `window.monaco || window.Monaco` 与 `.monaco-editor, .my-monaco-editor` 类名；内置 169 项全覆盖单元与集成测试（Pytest），全流程保障交互与解析稳定性。
+- **全局 Monaco 兼容与高鲁棒性工程基线**：全面兼容 `window.monaco || window.Monaco` 与 `.monaco-editor, .my-monaco-editor` 类名；内置 192 项全覆盖单元与集成测试（Pytest），全流程保障交互与解析稳定性。
+- **v4.1.0 架构增强**：支持标签页场景智能解耦定向路由（`prefer_type`）、隐形字符/行尾空格 repr 级高敏 Diff、关卡切换 SPA 加载态防抖自愈（`wait_for_spa_loading`）、空白开卷题显式感知（`is_blank_slate`）以及多 Tab 生命周期自动回收。
 
 ---
 

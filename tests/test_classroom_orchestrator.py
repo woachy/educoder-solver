@@ -10,6 +10,7 @@ from src.executor.classroom_orchestrator import (
     scan_classroom_tasks,
     _read_stdin_with_timeout,
     penetrate_detail_springboard,
+    cleanup_old_task_pages,
 )
 
 
@@ -436,5 +437,39 @@ def test_penetrate_detail_springboard_not_triggered_for_real_ide():
 
     assert result_page == mock_page
     mock_context.expect_page.assert_not_called()
+
+
+def test_open_classroom_task_cleans_up_old_task_pages():
+    """测试 open_classroom_task 成功开启大题后，自动调用 cleanup_old_task_pages 回收旧 Tab"""
+    mock_page = MagicMock()
+    mock_btn = MagicMock()
+    fake_tasks = [
+        {"index": 0, "title": "任务A", "is_completed": False, "button": mock_btn},
+    ]
+
+    mock_task_page = MagicMock()
+    mock_task_page.url = "http://educoder.net/tasks/102"
+    mock_context = MagicMock()
+    mock_page.context = mock_context
+    mock_task_page.context = mock_context
+    mock_context.expect_page.return_value.__enter__.return_value = MagicMock(value=mock_task_page)
+    mock_context.pages = [mock_page, mock_task_page]
+
+    mock_q = MagicMock()
+    mock_q.title = "第1关"
+    mock_q.type.value = "practical"
+    mock_q.metadata = {}
+
+    with patch("src.executor.classroom_orchestrator.scan_classroom_tasks", return_value=fake_tasks), \
+         patch("src.executor.classroom_orchestrator.dismiss_blocking_overlays"), \
+         patch("src.executor.classroom_orchestrator.random_delay"), \
+         patch("src.executor.classroom_orchestrator.penetrate_detail_springboard", return_value=mock_task_page), \
+         patch("src.executor.classroom_orchestrator.cleanup_old_task_pages", return_value=1) as mock_cleanup, \
+         patch("src.executor.classroom_orchestrator.extract_question", return_value=mock_q):
+
+        res = open_classroom_task(mock_page)
+        assert res["status"] == "success"
+        # 验证 cleanup_old_task_pages 被调用且入参为穿透后的 task_page
+        mock_cleanup.assert_called_once_with(mock_task_page)
 
 

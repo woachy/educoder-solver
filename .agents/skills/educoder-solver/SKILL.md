@@ -1,11 +1,11 @@
 ---
 name: educoder-solver
-description: 头歌平台 (Educoder) 全自动接管与答题专家。支持课堂大作业单步原子流与全自动巡航 (run-classroom-homework/open-task)，具备实训详情跳板页自动穿透、60s防秒刷跨进程打卡持久化控速、React Fiber 深度穿透真实保存 (onChange/onSave/commitID/Ctrl+S) 与单题关卡闭环答题 (solve-cycle)。在用户输入 /educoder-solver、请求自动完成整门课作业或解答实训题目时使用。
+description: 头歌平台 (Educoder) 全自动接管与答题专家。支持课堂大作业单步原子流与全自动巡航 (run-classroom-homework/open-task)，具备实训详情跳板页自动穿透、多 Tab 生命周期自动回收、prefer_type 智能定向解耦、60s防秒刷跨进程打卡持久化控速、React Fiber 深度穿透真实保存 (onChange/onSave/commitID/Ctrl+S) 与单题关卡闭环答题 (solve-cycle)。在用户输入 /educoder-solver、请求自动完成整门课作业或解答实训题目时使用。
 ---
 
-# 头歌自动答题与实训接管专家 (Educoder Solver Skill v4.0)
+# 头歌自动答题与实训接管专家 (Educoder Solver Skill v4.1)
 
-本 Skill 赋能 AI Agent 直接接管并操作用户已登录的头歌（Educoder）物理浏览器，形成**“感知 -> 推演 -> 跨进程持久化控速 -> React Fiber真实保存 -> 复合流水线作答 -> 双轨评测自愈 -> 课堂大作业巡航与跳板穿透”**的完整全自动答题闭环。
+本 Skill 赋能 AI Agent 直接接管并操作用户已登录的头歌（Educoder）物理浏览器，形成**“感知 -> 推演 -> 跨进程持久化控速 -> React Fiber真实保存 -> 复合流水线作答 -> 双轨评测自愈 -> 课堂大作业巡航与跳板穿透 -> 多 Tab 智能解耦与回收”**的完整全自动答题闭环。
 
 ---
 
@@ -13,7 +13,7 @@ description: 头歌平台 (Educoder) 全自动接管与答题专家。支持课�
 
 1. **大脑与手眼分离**：你（AI）是大脑，负责语义理解、算法编写与自愈纠错；本地 CLI 工具（`python -m src.cli`）是手眼，负责精准执行浏览器交互。
 2. **纯本地决策**：严禁调用任何外部第三方商业大模型 API，所有题目的推演、解题思路与代码编写均由你直接生成。
-3. **课堂大作业官方命令链准则**：若检测到处于课堂实训作业列表页，一问一答型短连接 AI Agent **强烈推荐单步原子流（`list-tasks` -> `open-task` -> `solve-cycle`）**；具备实时双向 stdio 通信环境方可使用 `run-classroom-homework --interactive`；`open-task` 已原生内置跳板详情页自动穿透与开题打卡持久化，严禁私自手写未经封装的临时 Python 脚本操作 Tab。
+3. **课堂大作业官方命令链与多 Tab 智能解耦**：若检测到处于课堂实训作业列表页，一问一答型短连接 AI Agent **强烈推荐单步原子流（`list-tasks` -> `open-task` -> `solve-cycle`）**；具备实时双向 stdio 通信环境方可使用 `run-classroom-homework --interactive`；`open-task` 已原生内置跳板详情页自动穿透、旧关卡 Tab 自动回收与开题打卡持久化；CLI 命令底层按职责解耦（列表匹配 classroom，解题匹配 shixun），严禁私自手写未经封装的临时 Python 脚本操作 Tab。
 4. **防秒刷控速与跨进程打卡持久化 (Anti-Cheat Pacing & Persistence)**：单关作答必须执行智能思考控速（默认 `--min-duration 60` 配合 `5~20s` 离散浮动）。开题打卡时间戳原子持久化至 `.cache/pacing_state.json`，解决短连接模式下时间戳内存丢失导致的重复 60s+ 盲等，等待期间注入微滚动活跃心跳，严禁秒刷触发教师端作弊审查。
 5. **React Fiber 真实保存与 Git 提交闭环**：代码注入必须穿透 React Fiber 调用 `ed.onChange` 与 `ed.onSave` 并提取后端 `commitID`，配合 `Ctrl+S` 键盘双重兜底，确保回执 `saved == true` 且云端代码真实同步后方可触发评测，彻底根除评测沙箱拉取到空代码或初始模板的致命缺陷。
 6. **低熵输出与信息提纯**：题干中的 `<table>` 必须转为 Markdown 表格，图片剔除 base64 噪音，评测回执收敛为高密度 `diff_hint`，全面保护 AI 思考题目的心智带宽。
@@ -110,6 +110,7 @@ flowchart TD
    .\.venv\Scripts\python -m src.cli open-task --index 1 --json
    ```
    - **跳板详情页自动穿透 (`penetrate_detail_springboard`)**：头歌部分大题在点击后会进入 `/detail?tabs=` 介绍页，底层会自动探测并点击“继续挑战”/“开始实训”直达编程 IDE 关卡，并安全关闭中间跳板页，**无需 AI 进行二次开题识别**。
+   - **多 Tab 智能生命周期回收 (`cleanup_old_task_pages`)**：开启新关卡后，底层会自动扫描当前上下文，安全回收除当前活动页外的所有旧实训 Tab，保留作业列表页，彻底杜绝标签页堆积与内存泄露。
    - **开题打卡跨进程持久化 (`.cache/pacing_state.json`)**：捕获新关卡后，自动记录当前关卡开题时间戳至本地持久化缓存，供后续 `solve-cycle` 跨进程读取并精确扣减思考已耗时。
    - **首关预感知与遮罩扫除**：将其激活置顶并自动清理阻塞遮罩，返回首关概要及题型预览。
 
@@ -118,12 +119,13 @@ flowchart TD
    - 提取题目：`.\.venv\Scripts\python -m src.cli dump-question --json`
    - 推演算法并通过复合流水线注入作答：
      ```powershell
-     .\.venv\Scripts\python -m src.cli solve-cycle --code "<你的核心代码>" --auto-next --min-duration 60 --json
+     # 复合答题并自动下一关，可选 --close-on-complete (通关后自动安全关闭当前关卡 Tab)
+     .\.venv\Scripts\python -m src.cli solve-cycle --code "<你的核心代码>" --auto-next --min-duration 60 --close-on-complete --json
      ```
    - 关卡评测全绿并通过 `--auto-next` 进入下一关；重复此步直至整道大题所有关卡通关。
 
 4. **推进下一道大题**：
-   一道大题通关后，再次执行 `list-tasks --json` 检查进度，继续 `open-task --json` 进入下一道大题，直至全课程作业完成。
+   一道大题通关后，再次执行 `list-tasks --json` 检查进度（底层通过 `prefer_type="classroom"` 自动精准命中作业列表页），继续 `open-task --json` 进入下一道大题，直至全课程作业完成。
 
 #### 模式 A2：长连接双向 stdio 协程流 (`run-classroom-homework --interactive`)
 仅在你的环境支持长连接后台守护进程并具备持续向 stdin 写入 JSON Lines 通道时使用：
@@ -156,7 +158,9 @@ flowchart TD
 系统将返回标准化的 `QuestionData` JSON：
 - `type`: 题目类型（`choice`, `multiple_choice`, `judgment`, `blank`, `practical`）
 - `description`: 题干（**已自动将 HTML `<table>` 转换为标准 Markdown 表格，图片已剔除 base64 转为 `[附图说明: xxx]`**）
-- `practical_details`: 实训专属数据（任务要求、输入输出样例、`prefix_code` / `target_code` / `suffix_code` 靶心区域）
+- `practical_details`: 实训专属数据（任务要求、输入输出样例、`prefix_code` / `target_code` / `suffix_code` 靶心区域、`is_blank_slate` 是否为无模板白纸题）
+- **空白开卷题显式感知 (Blank Slate)**：若 `practical_details.is_blank_slate == true`，表示关卡未提供初始代码骨架，需要 AI 从头全量编写完整代码。
+- **SPA 加载态防抖自愈**：关卡提取入口内置 3.5s 防抖等待，等待异步加载指示器（“努力请求数据中”或 `.ldsRing`、`.ant-spin-spinning`）消失且容器挂载完成，彻底杜绝关卡切换瞬间误判为 unknown。
 - **智能开题补打卡**：当识别到实训代码题且尚未打卡时，CLI 自动将当前关卡开题时间写入 `.cache/pacing_state.json`，确保无论从哪个入口进入关卡，控速器都有精确时间戳起点。
 
 ---

@@ -254,3 +254,176 @@ class TestBrowserSession:
         # 绝对红线：页面与 context 绝不能调用 close()
         mock_page.close.assert_not_called()
         mock_context.close.assert_not_called()
+
+    @patch("src.browser.manager.check_cdp_available", return_value=True)
+    @patch("src.browser.manager.sync_playwright")
+    def test_session_get_target_page_prefer_classroom(self, mock_playwright_cm, mock_check_cdp):
+        """测试 prefer_type='classroom' 优先命中课堂作业列表页，即使实训页排在前面"""
+        mock_page_shixun = MagicMock()
+        mock_page_shixun.url = "https://www.educoder.net/tasks/abc123"
+        mock_page_shixun.title.return_value = "实训作业 - 第1关"
+
+        mock_page_classroom = MagicMock()
+        mock_page_classroom.url = "https://www.educoder.net/classrooms/1024/shixun_homework"
+        mock_page_classroom.title.return_value = "数据库原理与技术 - 课堂作业"
+
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        # 实训页排在最前
+        mock_context.pages = [mock_page_shixun, mock_page_classroom]
+        mock_browser.contexts = [mock_context]
+
+        mock_playwright = MagicMock()
+        mock_playwright.chromium.connect_over_cdp.return_value = mock_browser
+        mock_playwright_cm.return_value.start.return_value = mock_playwright
+
+        with BrowserSession(port=9222) as session:
+            # 指定 prefer_type='classroom' 应匹配到作业列表页
+            target_page = session.get_target_page("educoder.net", prefer_type="classroom")
+            assert target_page == mock_page_classroom
+            assert "/shixun_homework" in target_page.url
+
+    @patch("src.browser.manager.check_cdp_available", return_value=True)
+    @patch("src.browser.manager.sync_playwright")
+    def test_session_get_target_page_prefer_shixun(self, mock_playwright_cm, mock_check_cdp):
+        """测试 prefer_type='shixun' 优先命中实训关卡页，即使作业列表页排在前面"""
+        mock_page_classroom = MagicMock()
+        mock_page_classroom.url = "https://www.educoder.net/classrooms/1024/shixun_homework"
+        mock_page_classroom.title.return_value = "数据库原理与技术 - 课堂作业"
+
+        mock_page_shixun = MagicMock()
+        mock_page_shixun.url = "https://www.educoder.net/tasks/abc123"
+        mock_page_shixun.title.return_value = "实训作业 - 第1关"
+
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        # 作业列表页排在最前
+        mock_context.pages = [mock_page_classroom, mock_page_shixun]
+        mock_browser.contexts = [mock_context]
+
+        mock_playwright = MagicMock()
+        mock_playwright.chromium.connect_over_cdp.return_value = mock_browser
+        mock_playwright_cm.return_value.start.return_value = mock_playwright
+
+        with BrowserSession(port=9222) as session:
+            target_page = session.get_target_page("educoder.net", prefer_type="shixun")
+            assert target_page == mock_page_shixun
+            assert "/tasks/" in target_page.url
+
+    @patch("src.browser.manager.check_cdp_available", return_value=True)
+    @patch("src.browser.manager.sync_playwright")
+    def test_session_get_target_page_prefer_type_fallback(self, mock_playwright_cm, mock_check_cdp):
+        """测试当所偏好的类型不存在时，平滑回退至另一种页面"""
+        mock_page_shixun = MagicMock()
+        mock_page_shixun.url = "https://www.educoder.net/tasks/abc123"
+        mock_page_shixun.title.return_value = "实训作业 - 第1关"
+
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        mock_context.pages = [mock_page_shixun]
+        mock_browser.contexts = [mock_context]
+
+        mock_playwright = MagicMock()
+        mock_playwright.chromium.connect_over_cdp.return_value = mock_browser
+        mock_playwright_cm.return_value.start.return_value = mock_playwright
+
+        with BrowserSession(port=9222) as session:
+            # 偏好 classroom 但只有 shixun 页，应回退命中 shixun 页
+            target_page = session.get_target_page("educoder.net", prefer_type="classroom")
+            assert target_page == mock_page_shixun
+
+    @patch("src.browser.manager.check_cdp_available", return_value=True)
+    @patch("src.browser.manager.sync_playwright")
+    def test_session_get_target_page_custom_keyword_priority(self, mock_playwright_cm, mock_check_cdp):
+        """测试用户传入非默认 keyword 时，精准匹配优先于 prefer_type"""
+        mock_page_shixun = MagicMock()
+        mock_page_shixun.url = "https://www.educoder.net/tasks/normal"
+        mock_page_shixun.title.return_value = "普通关卡"
+
+        mock_page_special = MagicMock()
+        mock_page_special.url = "https://www.educoder.net/special_assignment"
+        mock_page_special.title.return_value = "特别任务"
+
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        mock_context.pages = [mock_page_shixun, mock_page_special]
+        mock_browser.contexts = [mock_context]
+
+        mock_playwright = MagicMock()
+        mock_playwright.chromium.connect_over_cdp.return_value = mock_browser
+        mock_playwright_cm.return_value.start.return_value = mock_playwright
+
+        with BrowserSession(port=9222) as session:
+            target_page = session.get_target_page("special_assignment", prefer_type="shixun")
+            assert target_page == mock_page_special
+
+
+class TestCleanupOldTaskPages:
+    """测试冗余旧关卡标签页生命周期回收机制"""
+
+    def test_cleanup_old_task_pages_normal(self):
+        """测试正常回收除当前关卡外的旧实训 Tab，且保留作业列表与无关页面"""
+        from src.executor.classroom_orchestrator import cleanup_old_task_pages
+
+        current_page = MagicMock()
+        current_page.url = "https://www.educoder.net/tasks/level2"
+        current_page.title.return_value = "第2关：索引设计"
+
+        old_task_page = MagicMock()
+        old_task_page.url = "https://www.educoder.net/tasks/level1"
+        old_task_page.title.return_value = "第1关：建表"
+
+        old_shixun_page = MagicMock()
+        old_shixun_page.url = "https://www.educoder.net/shixuns/xyz123"
+        old_shixun_page.title.return_value = "旧实训介绍"
+
+        homework_list_page = MagicMock()
+        homework_list_page.url = "https://www.educoder.net/classrooms/1024/shixun_homework"
+        homework_list_page.title.return_value = "课堂作业列表"
+
+        other_page = MagicMock()
+        other_page.url = "https://www.baidu.com"
+        other_page.title.return_value = "百度搜索"
+
+        mock_context = MagicMock()
+        mock_context.pages = [
+            current_page,
+            old_task_page,
+            old_shixun_page,
+            homework_list_page,
+            other_page,
+        ]
+        current_page.context = mock_context
+
+        closed_cnt = cleanup_old_task_pages(current_page)
+
+        # 应该关闭 2 个旧关卡页 (old_task_page 与 old_shixun_page)
+        assert closed_cnt == 2
+        old_task_page.close.assert_called_once()
+        old_shixun_page.close.assert_called_once()
+
+        # 绝对不应关闭当前关卡页、作业列表页与外部页面
+        current_page.close.assert_not_called()
+        homework_list_page.close.assert_not_called()
+        other_page.close.assert_not_called()
+
+    def test_cleanup_old_task_pages_edge_cases(self):
+        """测试异常与边界场景容错"""
+        from src.executor.classroom_orchestrator import cleanup_old_task_pages
+
+        # None 输入
+        assert cleanup_old_task_pages(None) == 0
+
+        # 无 context
+        page_no_context = MagicMock()
+        page_no_context.context = None
+        assert cleanup_old_task_pages(page_no_context) == 0
+
+        # 只有当前页面自身
+        single_page = MagicMock()
+        single_context = MagicMock()
+        single_context.pages = [single_page]
+        single_page.context = single_context
+        single_page.url = "https://www.educoder.net/tasks/only_one"
+        assert cleanup_old_task_pages(single_page) == 0
+        single_page.close.assert_not_called()

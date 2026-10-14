@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.executor.diff_extractor import (
+    _line_by_line_diff,
     clean_text_content,
     extract_testcase_diff,
     generate_diff_hint,
@@ -109,15 +110,23 @@ class TestDiffExtractor:
         expected = "hello"
         actual = "hello\n"
         hint = generate_diff_hint(expected, actual, error_msg="", passed=False, pass_ratio="0/1")
-        assert "空白字符差异" in hint
-        assert "末尾多出" in hint
+        assert "核心文本完全一致" in hint
+        assert "隐形空白字符/换行不匹配" in hint
+        assert "末尾是否缺少或多出空格/换行" in hint
 
     def test_diff_hint_leading_space(self):
         """测试缩进/前后空白差异提示"""
         expected = "foo"
         actual = "  foo"
         hint = generate_diff_hint(expected, actual, error_msg="", passed=False, pass_ratio="0/1")
-        assert "缩进" in hint or "空格不匹配" in hint
+        assert "核心文本完全一致" in hint
+        assert "隐形空白字符/换行不匹配" in hint
+
+        # 行级逐行比对检测
+        line_hint = _line_by_line_diff(expected, actual)
+        assert line_hint is not None
+        assert "空白字符不匹配" in line_hint
+        assert "末尾空格或制表符" in line_hint
 
     def test_extract_python_traceback(self):
         """测试从控制台日志中提取 Traceback 异常栈"""
@@ -164,3 +173,81 @@ ZeroDivisionError: division by zero
         res = extract_testcase_diff("")
         assert res["passed"] is False
         assert res["diff_hint"] == "未获取到评测输出"
+
+    def test_invisible_trailing_space_mismatch(self):
+        """测试末尾隐形空格高敏识别 (预期 '6=3+3 ' vs 实际 '6=3+3')"""
+        # 1. 直接比对 generate_diff_hint
+        expected = "6=3+3 "
+        actual = "6=3+3"
+        hint = generate_diff_hint(expected, actual, error_msg="", passed=False, pass_ratio="0/1")
+        assert "⚠️ 核心文本完全一致，但存在隐形空白字符/换行不匹配！" in hint
+        assert "预期长度 6" in hint
+        assert "实际长度 5" in hint
+        assert "'6=3+3 '" in hint
+        assert "'6=3+3'" in hint
+        assert "请特别检查输出末尾是否缺少或多出空格/换行！" in hint
+        assert "当前测试集输出与预期一致" not in hint
+
+        # 2. 从 HTML 源码解析提取，验证 clean_text_content 与 extract_testcase_diff 完整链路
+        html = """
+        <div class="testcase-panel">
+            <div class="summary">共有 1 组测试集，已通过 0 组</div>
+            <div class="expected-output">6=3+3 </div>
+            <div class="actual-output">6=3+3</div>
+        </div>
+        """
+        res = extract_testcase_diff(html)
+        assert res["passed"] is False
+        assert res["expected"] == "6=3+3 "
+        assert res["actual"] == "6=3+3"
+        assert "⚠️ 核心文本完全一致，但存在隐形空白字符/换行不匹配！" in res["diff_hint"]
+        assert "当前测试集输出与预期一致" not in res["diff_hint"]
+
+        # 3. 多测试集比对场景：验证优先报出该具体空白字符差异，严禁误报为“当前测试集输出与预期一致 (可能存在其他未通过的隐藏测试集)”
+        html_multi = """
+        <div class="shixun-result">
+            <div class="summary">共有 2 组测试集，已通过 1 组</div>
+            <h4>【预期输出】</h4>
+            <pre>6=3+3 </pre>
+            <h4>【实际输出】</h4>
+            <pre>6=3+3</pre>
+        </div>
+        """
+        res_multi = extract_testcase_diff(html_multi)
+        assert res_multi["passed"] is False
+        assert res_multi["pass_ratio"] == "1/2"
+        assert "⚠️ 核心文本完全一致，但存在隐形空白字符/换行不匹配！" in res_multi["diff_hint"]
+        assert "当前测试集输出与预期一致" not in res_multi["diff_hint"]
+
+        # 4. 传入纯文本 stdout 与 error_output 模式
+        stdout_txt = "共有 1 组测试集，已通过 0 组\n预期输出：6=3+3 \n实际输出：6=3+3\n"
+        res_stdout = extract_testcase_diff(stdout_txt, error_output="")
+        assert res_stdout["passed"] is False
+        assert res_stdout["expected"] == "6=3+3 "
+        assert res_stdout["actual"] == "6=3+3"
+        assert "⚠️ 核心文本完全一致，但存在隐形空白字符/换行不匹配！" in res_stdout["diff_hint"]
+        assert "当前测试集输出与预期一致" not in res_stdout["diff_hint"]
+
+    def test_line_by_line_diff_invisible_tab_and_newline(self):
+        """测试逐行比对中行尾包含制表符或换行差异时的精确定位提示"""
+        # 1. 行尾包含制表符 \t
+        exp_tab = "Line 1\t\nLine 2"
+        act_tab = "Line 1\nLine 2"
+        hint_tab = _line_by_line_diff(exp_tab, act_tab)
+        assert hint_tab == "第 1 行文本一致但空白字符不匹配: 预期='Line 1\\t' vs 实际='Line 1' (请检查末尾空格或制表符)"
+
+        # 2. 第 2 行尾部包含多余空格
+        exp_space = "header\ndata 123   \nfooter"
+        act_space = "header\ndata 123\nfooter"
+        hint_space = _line_by_line_diff(exp_space, act_space)
+        assert hint_space == "第 2 行文本一致但空白字符不匹配: 预期='data 123   ' vs 实际='data 123' (请检查末尾空格或制表符)"
+
+        # 3. 多行在 generate_diff_hint 中完整委托并定位到第 2 行
+        gen_hint = generate_diff_hint(exp_space, act_space, error_msg="", passed=False, pass_ratio="0/1")
+        assert gen_hint == "第 2 行文本一致但空白字符不匹配: 预期='data 123   ' vs 实际='data 123' (请检查末尾空格或制表符)"
+
+        # 4. 单行包含制表符比对
+        exp_single_tab = "output\t"
+        act_single_tab = "output"
+        hint_single_tab = _line_by_line_diff(exp_single_tab, act_single_tab)
+        assert hint_single_tab == "第 1 行文本一致但空白字符不匹配: 预期='output\\t' vs 实际='output' (请检查末尾空格或制表符)"
