@@ -159,30 +159,63 @@ class BrowserSession:
         if not current_pages:
             raise TargetPageNotFoundError("当前浏览器中未检测到任何已打开的标签页。")
 
-        # 1. 最优先匹配具体的实训/任务关卡页面 (/tasks/ 或 /shixuns/)
+        # 1. 若用户显式指定了自定义关键字（非默认 educoder.net），优先精准匹配
+        if url_keyword.lower() != "educoder.net":
+            for page in current_pages:
+                try:
+                    if url_keyword.lower() in page.url.lower() or url_keyword.lower() in page.title().lower():
+                        logger.info(f"已精准匹配自定义目标页面: [{page.title()}]({page.url})")
+                        return page
+                except Exception:
+                    continue
+
+        # 2. 最优先匹配具体的实训/任务关卡作答页面 (/tasks/ 或 /shixuns/)
         for page in current_pages:
             try:
                 u = page.url.lower()
-                if url_keyword.lower() in u and ("/tasks/" in u or "/shixuns/" in u):
-                    logger.info(f"已精准匹配实训任务页面: [{page.title()}]({page.url})")
+                if "educoder.net" in u and ("/tasks/" in u or "/shixuns/" in u):
+                    logger.info(f"已精准匹配实训关卡作答页面: [{page.title()}]({page.url})")
                     return page
             except Exception:
                 continue
 
-        # 2. 其次按 URL 包含关键字匹配
+        # 3. 其次匹配具体的课堂作业/实训列表页 (如 /shixun_homework, /homeworks, /classrooms/<id>)
+        # 排除无作业卡片的全局班级列表 (/classrooms 根路径) 与个人主页
+        import re
         for page in current_pages:
             try:
-                if url_keyword.lower() in page.url.lower():
+                u = page.url.lower()
+                if "educoder.net" in u:
+                    if "/shixun_homework" in u or "/homeworks" in u or re.search(r"/classrooms/\d+", u):
+                        logger.info(f"已精准匹配课堂作业列表页面: [{page.title()}]({page.url})")
+                        return page
+            except Exception:
+                continue
+
+        # 4. 再次按 URL 包含关键字匹配 (优先非纯 /classrooms 总览页)
+        for page in current_pages:
+            try:
+                u = page.url.lower()
+                if url_keyword.lower() in u and not u.rstrip("/").endswith("/classrooms"):
                     logger.info(f"已匹配目标页面 (URL匹配): [{page.title()}]({page.url})")
                     return page
             except Exception:
                 continue
 
-        # 其次按标题包含关键字匹配
+        # 5. 按标题包含关键字匹配
         for page in current_pages:
             try:
                 if url_keyword.lower() in page.title().lower():
                     logger.info(f"已匹配目标页面 (标题匹配): [{page.title()}]({page.url})")
+                    return page
+            except Exception:
+                continue
+
+        # 6. 兜底匹配任意包含 url_keyword 的页面
+        for page in current_pages:
+            try:
+                if url_keyword.lower() in page.url.lower():
+                    logger.info(f"已匹配目标页面 (兜底URL匹配): [{page.title()}]({page.url})")
                     return page
             except Exception:
                 continue

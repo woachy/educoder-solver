@@ -155,6 +155,34 @@ class TestBrowserSession:
 
     @patch("src.browser.manager.check_cdp_available", return_value=True)
     @patch("src.browser.manager.sync_playwright")
+    def test_session_get_target_page_prefers_homework_over_classrooms(self, mock_playwright_cm, mock_check_cdp):
+        """当同时打开班级总览与作业列表时，优先匹配具体的作业列表页"""
+        mock_page_overview = MagicMock()
+        mock_page_overview.url = "https://www.educoder.net/classrooms"
+        mock_page_overview.title.return_value = "我的课堂列表"
+
+        mock_page_homework = MagicMock()
+        mock_page_homework.url = "https://www.educoder.net/classrooms/1024/shixun_homework"
+        mock_page_homework.title.return_value = "数据库原理与技术 - 实训作业"
+
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        # 总览页在前，作业页在后
+        mock_context.pages = [mock_page_overview, mock_page_homework]
+        mock_browser.contexts = [mock_context]
+
+        mock_playwright = MagicMock()
+        mock_playwright.chromium.connect_over_cdp.return_value = mock_browser
+        mock_playwright_cm.return_value.start.return_value = mock_playwright
+
+        with BrowserSession(port=9222) as session:
+            target_page = session.get_target_page("educoder.net")
+            # 必须精准优先匹配到作业列表页，避免误抓班级总览页
+            assert target_page == mock_page_homework
+            assert "/shixun_homework" in target_page.url
+
+    @patch("src.browser.manager.check_cdp_available", return_value=True)
+    @patch("src.browser.manager.sync_playwright")
     def test_session_get_target_page_by_title(self, mock_playwright_cm, mock_check_cdp):
         """当 URL 未显式包含关键字时，根据页面 Title 匹配"""
         mock_page = MagicMock()

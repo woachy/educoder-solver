@@ -29,7 +29,11 @@ from src.browser.manager import (
 )
 from src.config import config
 from src.executor.blank_action import submit_blank_answer
-from src.executor.classroom_orchestrator import run_classroom_cruise
+from src.executor.classroom_orchestrator import (
+    list_classroom_tasks,
+    open_classroom_task,
+    run_classroom_cruise,
+)
 from src.executor.choice_action import submit_choice_answer
 from src.executor.editor_action import inject_code
 from src.executor.eval_action import EvaluationManager
@@ -539,6 +543,80 @@ def cmd_solve_cycle(args: argparse.Namespace) -> None:
         _handle_connection_error(e, json_mode)
 
 
+def cmd_list_tasks(args: argparse.Namespace) -> None:
+    """只读扫描并列出当前课堂作业列表页中的所有大题与完成状态"""
+    json_mode = args.json or config.log.json_mode
+    keyword = getattr(args, "match", None) or config.browser.target_domain
+
+    try:
+        with BrowserSession() as session:
+            page = session.get_target_page(keyword)
+            tasks = list_classroom_tasks(page)
+            total = len(tasks)
+            completed = sum(1 for t in tasks if t["is_completed"])
+            pending = sum(1 for t in tasks if not t["is_completed"] and t["can_operate"])
+
+            result_dict = {
+                "status": "success",
+                "total_tasks": total,
+                "completed_tasks": completed,
+                "pending_tasks": pending,
+                "tasks": tasks,
+            }
+
+            if json_mode:
+                print_json_result(result_dict)
+            else:
+                table = Table(title=f"课堂实训作业列表 (共 {total} 道大题, 待完成 {pending} 道)")
+                table.add_column("序号", justify="center", style="cyan")
+                table.add_column("大题名称", style="white")
+                table.add_column("状态", style="yellow")
+                table.add_column("可操作", justify="center")
+
+                for t in tasks:
+                    style = "bold green" if t["is_completed"] else "bold yellow"
+                    table.add_row(
+                        str(t["index"] + 1),
+                        t["title"],
+                        f"[{style}]{t['status']}[/{style}]",
+                        "[green]YES[/green]" if t["can_operate"] else "[dim]NO[/dim]",
+                    )
+                console.print(table)
+    except Exception as e:
+        _handle_connection_error(e, json_mode)
+
+
+def cmd_open_task(args: argparse.Namespace) -> None:
+    """单步开启指定大题（默认第 1 个未完成大题），切换至新 Tab 并激活供后续做题"""
+    json_mode = args.json or config.log.json_mode
+    index = getattr(args, "index", None)
+    keyword = getattr(args, "match", None) or config.browser.target_domain
+
+    try:
+        with BrowserSession() as session:
+            page = session.get_target_page(keyword)
+            res = open_classroom_task(page, index=index)
+
+            if json_mode:
+                print_json_result(res)
+            else:
+                if res.get("status") == "success":
+                    console.print(
+                        Panel(
+                            f"[bold green]已成功开启大题[/bold green]: {res.get('task_title')}\n"
+                            f"任务链接: {res.get('task_url')}\n"
+                            f"首关题型: [cyan]{res.get('level_preview', {}).get('type')}[/cyan]\n"
+                            f"首关标题: {res.get('level_preview', {}).get('title')}",
+                            title="开启大题成功",
+                            border_style="green",
+                        )
+                    )
+                else:
+                    console.print(f"[bold red]{res.get('message')}[/bold red]")
+    except Exception as e:
+        _handle_connection_error(e, json_mode)
+
+
 def cmd_run_classroom_homework(args: argparse.Namespace) -> None:
     """全自动巡航编排执行课堂大作业"""
     json_mode = args.json or config.log.json_mode
@@ -546,16 +624,19 @@ def cmd_run_classroom_homework(args: argparse.Namespace) -> None:
     min_duration = getattr(args, "min_duration", 60) if getattr(args, "min_duration", None) is not None else 60
     auto_next = getattr(args, "auto_next", True)
     interactive = getattr(args, "interactive", False)
+    dry_run = getattr(args, "dry_run", False)
+    keyword = getattr(args, "match", None) or config.browser.target_domain
 
     try:
         with BrowserSession() as session:
-            page = session.get_target_page(config.browser.target_domain)
+            page = session.get_target_page(keyword)
             report = run_classroom_cruise(
                 page=page,
                 max_tasks=max_tasks,
                 min_duration=min_duration,
                 auto_next=auto_next,
                 interactive=interactive,
+                dry_run=dry_run,
             )
 
             if json_mode:
@@ -667,12 +748,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_term.add_argument("--timeout", type=int, default=60, help="评测等待超时 (秒，默认 60)")
     p_term.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
-    # 10. run-classroom-homework (课堂大作业全自动巡航编排)
+    # 10. list-tasks / scan-classroom (只读扫描课堂大作业列表)
+    p_list = subparsers.add_parser("list-tasks", aliases=["scan-classroom"], help="只读扫描课堂作业列表所有大题卡片与完成状态")
+    p_list.add_argument("--match", "-m", help="指定目标页面的 URL 或标题匹配关键字")
+    p_list.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
+    # 11. open-task (单步开启指定大题)
+    p_open = subparsers.add_parser("open-task", help="单步开启指定大题（默认第 1 个未完成大题），切换至新 Tab 激活")
+    p_open.add_argument("--index", "-i", type=int, default=None, help="目标大题卡片索引 (0-indexed)")
+    p_open.add_argument("--match", "-m", help="指定目标页面的 URL 或标题匹配关键字")
+    p_open.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
+    # 12. run-classroom-homework (课堂大作业全自动巡航编排)
     p_cruise = subparsers.add_parser("run-classroom-homework", help="全自动巡航编排跑完课堂实训大作业")
     p_cruise.add_argument("--max-tasks", type=int, default=10, help="最大连续推进大题数量 (默认 10)")
     p_cruise.add_argument("--min-duration", type=int, default=60, help="单题防秒刷最小作答总时长 (秒，默认 60，设为 0 直出)")
     p_cruise.add_argument("--auto-next", action="store_true", default=True, help="关卡通过后自动流转下一关 (默认 True)")
     p_cruise.add_argument("--interactive", "-i", action="store_true", help="启用基于 stdio JSON Lines 的 Agent-CLI 双向交互巡航协议")
+    p_cruise.add_argument("--dry-run", action="store_true", help="仅演练扫描大题，不进入关卡和提交")
+    p_cruise.add_argument("--match", "-m", help="指定目标页面的 URL 或标题匹配关键字")
     p_cruise.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
     return parser
@@ -702,6 +796,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         "submit-answer": cmd_submit_answer,
         "submit-terminal": cmd_submit_terminal,
         "solve-cycle": cmd_solve_cycle,
+        "list-tasks": cmd_list_tasks,
+        "scan-classroom": cmd_list_tasks,
+        "open-task": cmd_open_task,
         "run-classroom-homework": cmd_run_classroom_homework,
     }
 

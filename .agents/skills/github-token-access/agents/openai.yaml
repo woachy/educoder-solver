@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub 令牌访问"
+  short_description: "使用本地令牌操作 GitHub 账号 woacyh"
+  default_prompt: "使用 $github-token-access 查看我的 GitHub 仓库并执行需要的操作。"

@@ -4,8 +4,11 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from src.executor.classroom_orchestrator import (
+    list_classroom_tasks,
+    open_classroom_task,
     run_classroom_cruise,
     scan_classroom_tasks,
+    _read_stdin_with_timeout,
 )
 
 
@@ -188,3 +191,140 @@ def test_run_classroom_cruise_interactive_mode():
         ev2 = json.loads(stdout_lines[1])
         assert ev2["event"] == "eval_result"
         assert ev2["passed"] is True
+
+
+def test_list_classroom_tasks():
+    """测试 list_classroom_tasks 返回纯序列化字典列表"""
+    mock_page = MagicMock()
+    mock_btn = MagicMock()
+    fake_tasks = [
+        {"index": 0, "title": "任务A", "status": "已完成", "is_completed": True, "button": None, "raw_text": "textA"},
+        {"index": 1, "title": "任务B", "status": "未完成", "is_completed": False, "button": mock_btn, "raw_text": "textB"},
+    ]
+
+    with patch("src.executor.classroom_orchestrator.scan_classroom_tasks", return_value=fake_tasks):
+        res = list_classroom_tasks(mock_page)
+        assert len(res) == 2
+        assert res[0]["title"] == "任务A"
+        assert res[0]["can_operate"] is False
+        assert "button" not in res[0]
+
+        assert res[1]["title"] == "任务B"
+        assert res[1]["can_operate"] is True
+        assert "button" not in res[1]
+
+
+def test_open_classroom_task_empty():
+    """测试页面未扫描到任务时的错误提示"""
+    mock_page = MagicMock()
+    with patch("src.executor.classroom_orchestrator.scan_classroom_tasks", return_value=[]):
+        res = open_classroom_task(mock_page)
+        assert res["status"] == "error"
+        assert "未扫描到" in res["message"]
+
+
+def test_open_classroom_task_all_completed():
+    """测试所有任务已完成时的提示"""
+    mock_page = MagicMock()
+    fake_tasks = [
+        {"index": 0, "title": "任务A", "is_completed": True, "button": None},
+    ]
+    with patch("src.executor.classroom_orchestrator.scan_classroom_tasks", return_value=fake_tasks):
+        res = open_classroom_task(mock_page)
+        assert res["status"] == "success"
+        assert res["all_completed"] is True
+
+
+def test_open_classroom_task_success():
+    """测试成功开启大题并切换 Tab"""
+    mock_page = MagicMock()
+    mock_btn = MagicMock()
+    fake_tasks = [
+        {"index": 0, "title": "任务A", "is_completed": True, "button": None},
+        {"index": 1, "title": "任务B", "is_completed": False, "button": mock_btn},
+    ]
+
+    mock_task_page = MagicMock()
+    mock_task_page.url = "http://educoder.net/shixun/102"
+    mock_context = MagicMock()
+    mock_page.context = mock_context
+    mock_context.expect_page.return_value.__enter__.return_value = MagicMock(value=mock_task_page)
+    mock_context.pages = [mock_page, mock_task_page]
+
+    mock_q = MagicMock()
+    mock_q.title = "第1关：数据插入"
+    mock_q.type.value = "practical"
+    mock_q.metadata = {"db_dialect": "mysql", "language": "sql", "has_target_marker": True}
+
+    with patch("src.executor.classroom_orchestrator.scan_classroom_tasks", return_value=fake_tasks), \
+         patch("src.executor.classroom_orchestrator.dismiss_blocking_overlays"), \
+         patch("src.executor.classroom_orchestrator.random_delay"), \
+         patch("src.executor.classroom_orchestrator.extract_question", return_value=mock_q):
+
+        res = open_classroom_task(mock_page)
+        assert res["status"] == "success"
+        assert res["task_index"] == 1
+        assert res["task_title"] == "任务B"
+        assert res["level_preview"]["title"] == "第1关：数据插入"
+        mock_btn.click.assert_called_once()
+        mock_task_page.bring_to_front.assert_called_once()
+
+
+def test_run_classroom_cruise_dry_run():
+    """测试 dry_run 演练模式仅扫描不点击"""
+    mock_page = MagicMock()
+    mock_btn = MagicMock()
+    fake_tasks = [
+        {"index": 0, "title": "任务1", "status": "已完成", "is_completed": True, "button": None},
+        {"index": 1, "title": "任务2", "status": "未完成", "is_completed": False, "button": mock_btn},
+    ]
+
+    with patch("src.executor.classroom_orchestrator.scan_classroom_tasks", return_value=fake_tasks):
+        report = run_classroom_cruise(mock_page, dry_run=True)
+        assert report["status"] == "dry_run"
+        assert report["total_tasks_found"] == 2
+        assert len(report["pending_tasks"]) == 1
+        assert report["pending_tasks"][0]["title"] == "任务2"
+        mock_btn.click.assert_not_called()
+
+
+def test_run_classroom_cruise_stdin_timeout():
+    """测试 interactive 模式下等待输入超时安全退出，不造成进程假死"""
+    import io
+    import json
+
+    mock_page = MagicMock()
+    mock_btn = MagicMock()
+    fake_tasks = [
+        {"index": 0, "title": "超时大题", "is_completed": False, "button": mock_btn},
+    ]
+
+    mock_task_page = MagicMock()
+    mock_task_page.content.return_value = "<html><body><div>任务</div></body></html>"
+    mock_task_page.url = "http://educoder.net/shixun/timeout"
+
+    mock_context = MagicMock()
+    mock_page.context = mock_context
+    mock_context.expect_page.return_value.__enter__.return_value = MagicMock(value=mock_task_page)
+    mock_context.pages = [mock_page, mock_task_page]
+
+    fake_stdout = io.StringIO()
+
+    with patch("src.executor.classroom_orchestrator.scan_classroom_tasks", return_value=fake_tasks), \
+         patch("src.executor.classroom_orchestrator.dismiss_blocking_overlays"), \
+         patch("src.executor.classroom_orchestrator.random_delay"), \
+         patch("src.executor.classroom_orchestrator._read_stdin_with_timeout", return_value=None), \
+         patch("sys.stdout", fake_stdout):
+
+        report = run_classroom_cruise(
+            page=mock_page,
+            max_tasks=1,
+            interactive=True,
+            stdin_timeout=0.01,
+        )
+
+        assert report["status"] == "success"
+        assert report["tasks_failed"] == 1
+        stdout_lines = [line.strip() for line in fake_stdout.getvalue().splitlines() if line.strip()]
+        assert any("timeout" in l for l in stdout_lines)
+

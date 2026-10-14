@@ -164,6 +164,125 @@ def scan_classroom_tasks(page: Page) -> List[Dict[str, Any]]:
     return tasks
 
 
+def list_classroom_tasks(page: Page) -> List[Dict[str, Any]]:
+    """以只读安全方式扫描并返回所有大题卡片（不含 DOM 元素句柄，可直接 JSON 序列化）。"""
+    raw_tasks = scan_classroom_tasks(page)
+    clean_tasks = []
+    for t in raw_tasks:
+        clean_tasks.append({
+            "index": t.get("index", 0),
+            "title": t.get("title", ""),
+            "status": t.get("status", "未知"),
+            "is_completed": t.get("is_completed", False),
+            "can_operate": t.get("button") is not None,
+            "raw_text": t.get("raw_text", ""),
+        })
+    return clean_tasks
+
+
+def open_classroom_task(page: Page, index: Optional[int] = None) -> Dict[str, Any]:
+    """单步开启指定大题（默认第 1 个未完成大题），捕获并切换到新 Tab，返回关卡感知数据。"""
+    raw_tasks = scan_classroom_tasks(page)
+    if not raw_tasks:
+        return {"status": "error", "message": "当前页面未扫描到任何大题卡片，请确保处于课堂作业列表页"}
+
+    target_task = None
+    if index is not None:
+        for t in raw_tasks:
+            if t["index"] == index:
+                target_task = t
+                break
+        if not target_task:
+            return {"status": "error", "message": f"未找到索引为 #{index} 的大题卡片"}
+    else:
+        # 默认找到第一个未完成且有按钮的大题
+        for t in raw_tasks:
+            if not t["is_completed"] and t["button"] is not None:
+                target_task = t
+                break
+        if not target_task:
+            return {"status": "success", "all_completed": True, "message": "所有大题均已完成！"}
+
+    task_title = target_task["title"]
+    task_btn = target_task["button"]
+    if not task_btn:
+        return {"status": "error", "message": f"大题 [{task_title}] 没有可点击的操作按钮"}
+
+    task_page = None
+    context = getattr(page, "context", None)
+    try:
+        if context and hasattr(context, "expect_page") and callable(context.expect_page):
+            try:
+                with context.expect_page(timeout=10000) as page_info:
+                    task_btn.click()
+                task_page = page_info.value
+                logger.info(f"已捕获大题新标签页: {task_page.url}")
+                if hasattr(task_page, "wait_for_load_state"):
+                    task_page.wait_for_load_state("domcontentloaded")
+            except Exception as pe:
+                logger.debug(f"expect_page 超时: {pe}")
+    except Exception as e:
+        logger.error(f"点击开启大题异常: {e}")
+
+    if not task_page and context and hasattr(context, "pages") and isinstance(context.pages, list):
+        if len(context.pages) > 1:
+            task_page = context.pages[-1]
+
+    if not task_page:
+        task_page = page
+
+    # 激活并聚焦新页面
+    try:
+        task_page.bring_to_front()
+    except Exception:
+        pass
+
+    random_delay(1.0, 2.0)
+    dismiss_blocking_overlays(task_page)
+
+    # 预感知第一关
+    q_data = extract_question(task_page)
+    preview = {
+        "title": q_data.title,
+        "type": q_data.type.value if hasattr(q_data.type, "value") else str(q_data.type),
+        "db_dialect": q_data.metadata.get("db_dialect"),
+        "language": q_data.metadata.get("language"),
+        "has_target_marker": q_data.metadata.get("has_target_marker", False),
+    }
+
+    return {
+        "status": "success",
+        "task_index": target_task["index"],
+        "task_title": task_title,
+        "task_url": getattr(task_page, "url", ""),
+        "level_preview": preview,
+        "message": f"已成功开启大题 [{task_title}]，进入第 1 关作答页",
+    }
+
+
+def _read_stdin_with_timeout(timeout: float = 30.0) -> Optional[str]:
+    """安全读取 stdin，带超时与异常保护，杜绝非交互模式下的永久死锁"""
+    import queue
+    import sys
+    import threading
+
+    q: queue.Queue = queue.Queue()
+
+    def _reader():
+        try:
+            line = sys.stdin.readline()
+            q.put(line)
+        except Exception:
+            q.put(None)
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+    try:
+        return q.get(timeout=timeout)
+    except queue.Empty:
+        return None
+
+
 def run_classroom_cruise(
     page: Page,
     max_tasks: int = 10,
@@ -171,6 +290,8 @@ def run_classroom_cruise(
     auto_next: bool = True,
     solver_callback: Optional[Callable[[Page, Any], bool]] = None,
     interactive: bool = False,
+    dry_run: bool = False,
+    stdin_timeout: float = 30.0,
 ) -> Dict[str, Any]:
     """课堂大作业全自动巡航编排执行入口。
 
@@ -181,18 +302,34 @@ def run_classroom_cruise(
         auto_next: 评测通过后是否自动流转至下一关 (默认 True)
         solver_callback: 可选的自定义单关求解回调
         interactive: 是否启用基于 stdio JSON Lines 的 Agent-CLI 双向交互巡航协议
+        dry_run: 演练模式，仅扫描列出待做题目，不点击提交
+        stdin_timeout: 交互模式下等待 stdin 输入的超时秒数 (默认 30s)
 
     Returns:
         dict: 全流程作业通关汇总报表
     """
     cruise_start = time.time()
-    logger.info(f">>> 启动课堂大作业全自动巡航编排 (最大大题数: {max_tasks}, 关卡控速: {min_duration}s, 交互模式: {interactive}) <<<")
+    logger.info(
+        f">>> 启动课堂大作业全自动巡航编排 (最大大题数: {max_tasks}, 关卡控速: {min_duration}s, 交互模式: {interactive}, 演练: {dry_run}) <<<"
+    )
 
     tasks = scan_classroom_tasks(page)
     total_found = len(tasks)
     pending_tasks = [t for t in tasks if not t["is_completed"] and t["button"] is not None]
 
     logger.info(f"巡航概况: 发现总大题 {total_found} 道，其中待完成 {len(pending_tasks)} 道")
+
+    if dry_run:
+        logger.info("[Dry Run 演练模式] 仅扫描列出任务，不实际进入关卡")
+        return {
+            "status": "dry_run",
+            "total_tasks_found": total_found,
+            "tasks_processed": 0,
+            "tasks_completed": 0,
+            "tasks_skipped": total_found - len(pending_tasks),
+            "pending_tasks": [{"index": t["index"], "title": t["title"], "status": t["status"]} for t in pending_tasks],
+            "message": f"演练扫描完成: 共发现 {total_found} 道大题，待完成 {len(pending_tasks)} 道",
+        }
 
     task_reports: List[Dict[str, Any]] = []
     completed_count = 0
@@ -271,9 +408,21 @@ def run_classroom_cruise(
                     sys.stdout.write(json.dumps(event_payload, ensure_ascii=False) + "\n")
                     sys.stdout.flush()
 
-                    # 等待 Agent 输入命令
-                    line = sys.stdin.readline()
-                    if not line:
+                    # 等待 Agent 输入命令 (带超时保护，杜绝死锁僵死)
+                    line = _read_stdin_with_timeout(timeout=stdin_timeout)
+                    if line is None:
+                        logger.warning(f"[{task_title}] 等待外部 Agent 交互输入超时 ({stdin_timeout}s)，安全退出避免进程僵死")
+                        timeout_event = {
+                            "event": "timeout",
+                            "task_title": task_title,
+                            "level_index": level_idx,
+                            "message": f"等待外部 Agent 交互输入超时 ({stdin_timeout}s)，未收到指令。提示：一问一答模式的 AI 请使用单步命令流（list-tasks / open-task / solve-cycle）",
+                        }
+                        sys.stdout.write(json.dumps(timeout_event, ensure_ascii=False) + "\n")
+                        sys.stdout.flush()
+                        task_success = False
+                        break
+                    elif not line.strip():
                         logger.warning("Agent 交互通道已关闭，退出巡航")
                         task_success = False
                         break
@@ -327,6 +476,13 @@ def run_classroom_cruise(
                         break
                 else:
                     # 默认使用现有复合流水线评测
+                    if not current_code.strip():
+                        logger.warning(
+                            f"[{task_title}] 第 {level_idx} 关代码编辑器内容为空且未提供解答，跳过本题评测 (请提供 --code 或使用交互/单步模式作答)"
+                        )
+                        task_success = False
+                        break
+
                     solve_res = run_solve_cycle(
                         page=task_page,
                         code=current_code,

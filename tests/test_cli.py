@@ -75,6 +75,29 @@ class TestCliParser:
         assert args.data == "A"
         assert args.json is True
 
+    def test_parser_list_tasks(self):
+        parser = build_parser()
+        args = parser.parse_args(["list-tasks", "--match", "homework", "--json"])
+        assert args.command == "list-tasks"
+        assert args.match == "homework"
+        assert args.json is True
+
+    def test_parser_open_task(self):
+        parser = build_parser()
+        args = parser.parse_args(["open-task", "--index", "2", "--match", "homework", "--json"])
+        assert args.command == "open-task"
+        assert args.index == 2
+        assert args.match == "homework"
+        assert args.json is True
+
+    def test_parser_run_classroom_homework_flags(self):
+        parser = build_parser()
+        args = parser.parse_args(["run-classroom-homework", "--dry-run", "--match", "classrooms/123", "--json"])
+        assert args.command == "run-classroom-homework"
+        assert args.dry_run is True
+        assert args.match == "classrooms/123"
+        assert args.json is True
+
 
 class TestCliExecution:
     """测试各子命令执行与 --json 结构化输出"""
@@ -299,3 +322,37 @@ class TestCliExecution:
 
             assert data["status"] == "success"
             assert data["command"] == "ls -la"
+
+    def test_cmd_list_tasks_json(self, capsys):
+        """测试 list-tasks 命令输出干净的任务列表"""
+        fake_tasks = [
+            {"index": 0, "title": "任务一", "status": "已完成", "is_completed": True, "can_operate": False},
+            {"index": 1, "title": "任务二", "status": "未完成", "is_completed": False, "can_operate": True},
+        ]
+        with patch("src.cli.BrowserSession"), \
+             patch("src.cli.list_classroom_tasks", return_value=fake_tasks):
+            main(["list-tasks", "--json"])
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["status"] == "success"
+            assert data["total_tasks"] == 2
+            assert data["pending_tasks"] == 1
+            assert len(data["tasks"]) == 2
+
+    def test_cmd_open_task_json(self, capsys):
+        """测试 open-task 命令开启大题并输出首关概要"""
+        fake_res = {
+            "status": "success",
+            "task_index": 1,
+            "task_title": "任务二",
+            "level_preview": {"title": "第1关"},
+        }
+        with patch("src.cli.BrowserSession"), \
+             patch("src.cli.open_classroom_task", return_value=fake_res):
+            main(["open-task", "--index", "1", "--json"])
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["status"] == "success"
+            assert data["task_index"] == 1
+            assert data["task_title"] == "任务二"
+

@@ -11,8 +11,14 @@
 - **Playwright 安装**：`playwright install chromium`（仅备用，主流程挂载本机 9222 端口无需下载大浏览器）
 - **浏览器端口探针**：`python -m src.cli check-browser`
 - **页面检测与题目提取**：`python -m src.cli dump-question`
-- **课堂大作业全自动巡航 (推荐课程作业首选)**：`python -m src.cli run-classroom-homework [--max-tasks 10] [--min-duration 60] [--auto-next] --json`
-- **单关复合闭环流水线 (推荐实训单题首选)**：`python -m src.cli solve-cycle --code "<target_code>" [--file <path>] [--full] [--auto-next] [--min-duration 60] --json`
+- **课堂大作业推进 (双模式支持)**：
+  - **模式 1 (AI Agent 单步原子流，短连接 Agent 强烈首选)**：
+    - 列表只读扫描：`python -m src.cli list-tasks [--match <keyword>] --json`
+    - 单步开启大题：`python -m src.cli open-task [--index <N>] [--match <keyword>] --json`
+    - 关卡闭环作答：`python -m src.cli solve-cycle --code "<target_code>" [--file <path>] --auto-next [--min-duration 60] --json`
+  - **模式 2 (长连接双向协程流，带 30s 超时保护)**：
+    - 交互式全自动巡航：`python -m src.cli run-classroom-homework [--max-tasks 10] [--min-duration 60] [--dry-run] [--interactive] [--match <keyword>] --json`
+- **单关复合闭环流水线 (实训单题首选)**：`python -m src.cli solve-cycle --code "<target_code>" [--file <path>] [--full] [--auto-next] [--min-duration 60] --json`
 - **分步下发答题动作**：
   - 客观题：`python -m src.cli submit-choice --options A,C --json`
   - 填空题：`python -m src.cli submit-blank --answers '["答案1", "答案2"]' --json`
@@ -26,7 +32,7 @@
 
 ### Always do (强制执行)
 - **端口前置探活**：任何浏览器操作前，必须校验 `localhost:9222` 可达性，如未开启提示用户运行启动脚本。
-- **课堂大作业编排优先准则**：在面对整门课作业列表页面时，**必须优先使用 `run-classroom-homework` 指令**启动全自动巡航编排，由底层自动完成“列表扫描-过滤未完成-新开Tab-关卡推进-安全关Tab-刷新列表”，严禁手写临时 Python 脚本或零散操作标签页。
+- **课堂大作业官方命令链准则**：在面对整门课作业列表页面时，**必须使用官方命令链推进**：一问一答型短连接 AI Agent 优先使用单步原子流（`list-tasks` 扫描列表 -> `open-task` 激活新 Tab -> `dump-question` 感知题目 -> `solve-cycle` 闭环做题）；具备实时双向 stdio 管道的外部进程方可使用 `run-classroom-homework --interactive`。
 - **防秒刷控速硬性规范 (Anti-Cheat Pacing)**：严禁单关卡毫秒级秒刷触发教师端审查与平台风控！单关提交必须经过智能控速（默认 `--min-duration 60` 配合 `5~20s` 拟真离散抖动）。底层通过开题打卡机制智能计算差额并补足，等待期间注入微滚动保活心跳（每 15s），本地快速自测或用户明确要求极速时方可传 `0`。
 - **实训优先复合流水线**：实训题作答优先使用 `solve-cycle` 单次会话流水线，将“弹窗清理-Monaco穿透注入-控速等待-网络层/DOM双轨评测-Diff提纯-流转”收敛在单次 CDP 进程内，杜绝多次进程冷启动开销。
 - **题干表格结构化与低熵多模态准则**：遇到页面中的 `<table>` 必须通过 `table_to_markdown` 转为紧凑的 Markdown 表格嵌入题干，图片仅保留结构化引用（如 `[附图说明: xxx]`），严禁向大模型吐出未经清洗的大段 base64 乱码或原始 HTML 噪音。
@@ -44,14 +50,16 @@
 ### Never do (绝对红线)
 - **严禁向大模型吐出未经清洗的大段 DOM/HTML 杂音**：严禁将原始网页树、内联样式、base64 图片数据、第三方脚本或未解析的 DOM 源码塞入上下文，防止污染 AI 心智带宽。
 - **严禁直接秒刷导致被教师端审计**：禁止在生产环境关卡绕过思考控速机制以低于 5 秒的时长连刷通关。
-- **严禁在作业列表上手工写临时脚本切换 Tab**：严禁绕过 `run-classroom-homework` 在外部手工执行标签页关闭和多页面轮询。
+- **严禁私自编写临时 Python 脚本切换 Tab 或操作题目**：严禁在项目根目录或 `.cache/` 临时生成 `.py` 脚本来执行浏览器操作，所有列表扫描、大题开启、代码注入、关卡评测必须全部使用官方 CLI 子命令。
 - **严禁引入第三方商业大模型 API**：禁止任何添加外部商用 API Key（如 OpenAI / Claude API）的要求，决策大脑由本地 AI 担当。
 - **严禁硬编码用户凭证**：不得在代码中存储用户名、密码或 Token，会话完全复用物理浏览器已有 Cookie。
 - **严禁盲目死循环评测**：若连续 3 次评测报错未发生变化，必须停止触发“评测”按钮并向用户发出告警，严禁无限消耗平台评测配额。
 
 ## 4. 关键代码范式 (Code Patterns)
-- **课堂作业自动化巡航 (Classroom Cruise)**：通过 `run_classroom_cruise()` 调度 `scan_classroom_tasks -> expect_page -> solve_cycle -> close_task_page -> reload_list`，实现全套大作业无人值守自动推进。
+- **单步大题推进 (Atomic Step Orchestration)**：通过 `list_classroom_tasks(page)` 安全只读扫描卡片 -> `open_classroom_task(page, index)` 点击并捕获切换新 Tab -> 关卡内调用 `run_solve_cycle()` 循环推进。
+- **课堂作业自动化巡航 (Classroom Cruise)**：通过 `run_classroom_cruise()` 调度 `scan_classroom_tasks -> expect_page -> solve_cycle -> close_task_page -> reload_list`，配合 30s stdin 超时看门狗，实现无人值守自动推进。
 - **单会话复合答题流水线 (Solve Cycle)**：通过 `run_solve_cycle()` 在同一个页面生命周期内串联 `ModalSweeper -> inject_code (Monaco API/Fiber) -> wait_thinking_pacing -> Network/DOM TwoPhaseEval -> diff_extractor -> trigger_next_level`。
 - **两阶段防竞态与网络层拦截**：优先通过 CDP `expect_response` 截获后端评测 JSON 接口（`/evaluate`、`test_sets` 等），平滑回退至两阶段 DOM 快照比对（结合 `\d+S` 倒计时与 `_has_real_result` 校验），彻底消灭异步竞态假阳性。
 - **Monaco/Ace 内存级穿透注入**：遍历当前 Page 及所有 Frames，不仅探测 `window.monaco` 与 `window.ace`，同时深层穿透 DOM 节点的 React/Vue Fiber 实例（`__reactFiber$`, `__vue__`），实现 100% 内存级 setValue 注入，杜绝退化为低效的键盘模拟。
-- **CDP 标签页匹配**：遍历 `browser.contexts[0].pages`，通过 URL 包含 `educoder.net` 匹配目标 Tab，严禁随意关闭用户其它正在浏览的标签页。
+- **CDP 标签页匹配**：优先匹配实训任务页 (`/tasks/`, `/shixuns/`) 与作业列表页 (`/shixun_homework`, `/homeworks`, `/classrooms/<id>`)，自动规避纯 `/classrooms` 班级总览页，支持 `--match` 关键词精确匹配。
+
