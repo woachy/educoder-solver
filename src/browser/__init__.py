@@ -4,10 +4,16 @@ from src.browser.manager import (
     BrowserSession,
     TargetPageNotFoundError,
     check_cdp_available,
+    is_classroom_page,
+    is_shixun_task_page,
+    is_springboard_page,
 )
 
 __all__ = [
     "BrowserSession",
     "TargetPageNotFoundError",
     "check_cdp_available",
+    "is_classroom_page",
+    "is_springboard_page",
+    "is_shixun_task_page",
 ]

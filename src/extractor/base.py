@@ -18,6 +18,7 @@ class QuestionType(str, Enum):
     JUDGMENT = "judgment"                 # 判断题
     BLANK = "blank"                       # 填空题
     PRACTICAL = "practical"               # 编程实训题
+    EXAM_PAPER = "exam_paper"             # 试卷型 / 复合多题连排 (单选/填空等混合题)
     UNKNOWN = "unknown"                   # 未知题型
 
 
@@ -46,6 +47,33 @@ class BlankItem:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class SubQuestion:
+    """试卷型/复合大题中的子题目模型"""
+    index: int                            # 子题序号 (1-indexed)
+    type: QuestionType                    # 子题类型 (choice, multiple_choice, judgment, blank)
+    title: str = ""                       # 子题题干
+    description: str = ""                 # 子题描述 / 上下文
+    options: List[ChoiceOption] = field(default_factory=list) # 客观选项列表 (选择/判断题)
+    blanks: List[BlankItem] = field(default_factory=list)     # 填空输入槽位列表 (填空题)
+    latex_formulas: List[str] = field(default_factory=list)   # 提纯后的 LaTeX 表达式列表 (如关系代数公式)
+    selector: Optional[str] = None        # 子题容器选择器
+    metadata: Dict[str, Any] = field(default_factory=dict)    # 子题元数据
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "index": self.index,
+            "type": self.type.value if isinstance(self.type, QuestionType) else str(self.type),
+            "title": self.title,
+            "description": self.description,
+            "options": [opt.to_dict() for opt in self.options],
+            "blanks": [b.to_dict() for b in self.blanks],
+            "latex_formulas": self.latex_formulas,
+            "selector": self.selector,
+            "metadata": self.metadata,
+        }
 
 
 @dataclass
@@ -79,21 +107,24 @@ class QuestionData:
     description: str = ""
     options: List[ChoiceOption] = field(default_factory=list)
     blanks: List[BlankItem] = field(default_factory=list)
+    sub_questions: List[SubQuestion] = field(default_factory=list)
     practical_details: Optional[PracticalDetails] = None
     raw_html: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """将题目数据无损转换为字典格式"""
-        return {
+        res = {
             "type": self.type.value if isinstance(self.type, QuestionType) else str(self.type),
             "title": self.title,
             "description": self.description,
             "options": [opt.to_dict() for opt in self.options],
             "blanks": [b.to_dict() for b in self.blanks],
+            "sub_questions": [sq.to_dict() for sq in self.sub_questions],
             "practical_details": self.practical_details.to_dict() if self.practical_details else None,
             "metadata": self.metadata,
         }
+        return res
 
     def to_json(self, indent: int = 2) -> str:
         """转换为标准格式化 JSON 字符串"""

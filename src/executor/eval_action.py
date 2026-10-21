@@ -27,17 +27,57 @@ class EvaluationManager:
     """实训评测管理器与自愈熔断器"""
 
     EVAL_BUTTON_SELECTORS = [
+        # 类名包含 btn-run / runBtn 等 (覆盖哈希混淆如 .btn-run___fh7pl)
+        "button[class*='btn-run']",
+        "[class*='btn-run']",
+        "button[class*='btn_run']",
+        "[class*='btn_run']",
+        "button[class*='btnRun']",
+        "[class*='btnRun']",
+        "button[class*='run-btn']",
+        "[class*='run-btn']",
+        "button[class*='runBtn']",
+        "[class*='runBtn']",
+        # 属性如 title="运行评测" / title="评测"
+        "button[title*='运行评测']",
+        "[title*='运行评测']",
+        "button[title*='评测']",
+        "[title*='评测']",
+        "button[title*='提交']",
+        "[title*='提交']",
+        # 内嵌 <b>评测</b>, <span>评测</span>, <b>运行评测</b> 等
+        "button:has(b:has-text('运行评测'))",
+        "button:has(b:has-text('评测'))",
+        "button:has(span:has-text('运行评测'))",
+        "button:has(span:has-text('评测'))",
+        "a:has(b:has-text('运行评测'))",
+        "a:has(b:has-text('评测'))",
+        "a:has(span:has-text('运行评测'))",
+        "a:has(span:has-text('评测'))",
+        # 文本按钮
+        "button:has-text('运行评测')",
         "button:has-text('评测')",
-        "button:has-text('提交')",
+        "button:has-text('提交评测')",
+        "button:has-text('提交答案')",
+        "button:has-text('提交答卷')",
         "button:has-text('立即评测')",
+        "button:has-text('提交')",
+        "a:has-text('运行评测')",
         "a:has-text('评测')",
+        "a:has-text('提交')",
+        # 常见类名
         ".evaluate-btn",
         ".shixun-eval-btn",
         ".btn-test",
         ".btn-eval",
         "button.ant-btn:has-text('评测')",
         "button.el-button:has-text('评测')",
+        "button.ant-btn:has-text('提交')",
+        "button.el-button:has-text('提交')",
         ".submit-btn",
+        "[class*='submit-btn']",
+        "[class*='submitBtn']",
+        ":has-text('运行评测')",
     ]
 
     NEXT_LEVEL_SELECTORS = [
@@ -51,6 +91,23 @@ class EvaluationManager:
         ".btn-next",
         "button.ant-btn:has-text('下一关')",
         "button.el-button:has-text('下一关')",
+    ]
+
+    PREV_LEVEL_SELECTORS = [
+        "button:has-text('上一关')",
+        "a:has-text('上一关')",
+        "div[role='button']:has-text('上一关')",
+        "span:has-text('上一关')",
+        "button:has-text('前一关')",
+        "a:has-text('前一关')",
+        "button:has-text('返回上一关')",
+        ".prev-stage-btn",
+        ".prev-btn",
+        ".btn-prev",
+        "[class*='prev-stage']",
+        "[class*='prevStage']",
+        "button.ant-btn:has-text('上一关')",
+        "button.el-button:has-text('上一关')",
     ]
 
     LOADING_SELECTORS = [
@@ -126,26 +183,71 @@ class EvaluationManager:
 
         return False
 
-    def find_eval_button(self, page: Page) -> Optional[ElementHandle]:
-        """定位评测/提交按钮"""
+    def find_eval_button(self, page: Page, timeout: float = 0.0) -> Optional[ElementHandle]:
+        """定位评测/提交按钮，支持类名哈希混淆、内嵌元素与短时等待重试能力。
+
+        Args:
+            page: Playwright Page 实例
+            timeout: 最长等待重试秒数 (默认 0.0 表示仅执行单次即时查找)
+        """
         if not page:
             return None
 
-        for selector in self.EVAL_BUTTON_SELECTORS:
-            try:
-                btn = page.query_selector(selector)
-                if btn and btn.is_visible():
-                    return btn
-            except Exception:
-                continue
+        start_time = time.time()
+        while True:
+            # 1. 尝试选择器列表 (覆盖哈希混淆类名与 title 属性)
+            for selector in self.EVAL_BUTTON_SELECTORS:
+                try:
+                    btn = page.query_selector(selector)
+                    if btn and btn.is_visible():
+                        return btn
+                except Exception:
+                    continue
 
-        # 尝试通过 locator
-        try:
-            loc = page.locator("button:has-text('评测')").first
-            if loc and loc.count() > 0 and loc.is_visible():
-                return loc.element_handle()
-        except Exception:
-            pass
+            # 2. 尝试 locator 深度匹配
+            for loc_query in [
+                "button:has-text('运行评测')",
+                "button:has-text('评测')",
+                "button:has-text('提交评测')",
+                "button:has-text('提交答案')",
+                "button:has-text('提交答卷')",
+                "button:has-text('提交')",
+                "a:has-text('运行评测')",
+                "a:has-text('评测')",
+                "a:has-text('提交')",
+                "[role='button']:has-text('评测')",
+                "[role='button']:has-text('提交')",
+            ]:
+                try:
+                    loc = page.locator(loc_query).first
+                    if loc and loc.count() > 0 and loc.is_visible():
+                        return loc.element_handle()
+                except Exception:
+                    pass
+
+            # 3. 尝试 JS 语义深层探查 (兼容深层嵌套文本与动态渲染)
+            try:
+                js_btn = page.evaluate_handle("""() => {
+                    const targets = ['运行评测', '评测', '提交评测', '提交答案', '提交答卷', '提交'];
+                    const candidates = document.querySelectorAll('button, a, div[role="button"], span[role="button"]');
+                    for (const el of candidates) {
+                        const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+                        if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) continue;
+                        const title = el.getAttribute('title') || '';
+                        if (targets.some(t => title.includes(t))) return el;
+                        const txt = (el.innerText || el.textContent || '').trim();
+                        if (targets.some(t => txt === t || txt.startsWith(t) || txt.endsWith(t))) return el;
+                    }
+                    return null;
+                }""")
+                if js_btn and js_btn.as_element():
+                    return js_btn.as_element()
+            except Exception:
+                pass
+
+            if timeout <= 0 or (time.time() - start_time) >= timeout:
+                break
+            time.sleep(0.2)
 
         return None
 
@@ -503,8 +605,8 @@ class EvaluationManager:
         # 3. 记录前置评测结果快照 (用于两阶段防竞态比对，避免误读取旧结果)
         pre_snapshot = self.get_result_snapshot(page)
 
-        # 4. 定位评测按钮
-        eval_btn = self.find_eval_button(page)
+        # 4. 定位评测按钮 (具备短时重试能力)
+        eval_btn = self.find_eval_button(page, timeout=3.0)
         if not eval_btn:
             msg = "页面中未定位到评测或提交按钮"
             logger.error(msg)
@@ -661,4 +763,45 @@ class EvaluationManager:
                 return False
 
         logger.warning("未检测到可点击的‘下一关’按钮")
+        return False
+
+    def trigger_prev_level(self, page: Page) -> bool:
+        """识别并点击‘上一关’按钮，回退至前序关卡。
+
+        Returns:
+            bool: 成功点击返回 True，未找到或点击失败返回 False
+        """
+        logger.info("正在检索‘上一关’按钮...")
+        if not page:
+            return False
+
+        prev_btn = None
+        for selector in self.PREV_LEVEL_SELECTORS:
+            try:
+                btn = page.query_selector(selector)
+                if btn and btn.is_visible():
+                    prev_btn = btn
+                    break
+            except Exception:
+                continue
+
+        if not prev_btn:
+            try:
+                loc = page.locator("button:has-text('上一关'), a:has-text('上一关'), div[role='button']:has-text('上一关')").first
+                if loc and loc.count() > 0 and loc.is_visible():
+                    prev_btn = loc.element_handle()
+            except Exception:
+                pass
+
+        if prev_btn:
+            random_delay(0.5, 1.0)
+            try:
+                prev_btn.click()
+                logger.success("已成功点击‘上一关’，页面正在回退...")
+                return True
+            except Exception as e:
+                logger.error(f"点击‘上一关’按钮失败: {e}")
+                return False
+
+        logger.warning("未检测到可点击的‘上一关’按钮")
         return False

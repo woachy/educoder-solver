@@ -53,26 +53,36 @@ TASK_ACTION_BUTTON_SELECTORS = [
 INNER_CHALLENGE_BUTTON_SELECTORS = [
     "a:has-text('继续挑战')",
     "button:has-text('继续挑战')",
+    "div[role='button']:has-text('继续挑战')",
     "div:has-text('继续挑战')",
+    "span:has-text('继续挑战')",
+    "a:has-text('开启挑战')",
+    "button:has-text('开启挑战')",
+    "div[role='button']:has-text('开启挑战')",
+    "div:has-text('开启挑战')",
+    "span:has-text('开启挑战')",
     "a:has-text('开始实训')",
     "button:has-text('开始实训')",
+    "div[role='button']:has-text('开始实训')",
     "div:has-text('开始实训')",
+    "span:has-text('开始实训')",
     "a:has-text('进入实训')",
     "button:has-text('进入实训')",
+    "div[role='button']:has-text('进入实训')",
     "div:has-text('进入实训')",
     "a:has-text('立即实训')",
     "button:has-text('立即实训')",
     "div:has-text('立即实训')",
     "a:has-text('开始挑战')",
     "button:has-text('开始挑战')",
+    "div:has-text('开始挑战')",
+    "a:has-text('开始答题')",
+    "button:has-text('开始答题')",
+    "div:has-text('开始答题')",
     "a:has-text('去完成')",
     "button:has-text('去完成')",
     "a:has-text('开始学习')",
     "button:has-text('开始学习')",
-    ":has-text('继续挑战')",
-    ":has-text('开始实训')",
-    ":has-text('进入实训')",
-    ":has-text('开始挑战')",
 ]
 
 
@@ -95,26 +105,30 @@ def penetrate_detail_springboard(page: Page, context: Any = None) -> Page:
     current_url = getattr(page, "url", "") or ""
     is_detail_url = "/detail" in current_url.lower()
 
-    has_monaco = False
+    has_task_content = False
     if hasattr(page, "evaluate") and callable(page.evaluate):
         try:
             ev_res = page.evaluate(
-                "() => !!(((window.monaco || window.Monaco) && (window.monaco || window.Monaco).editor) || document.querySelector('.monaco-editor, .my-monaco-editor'))"
+                """() => {
+                    const hasMonaco = !!(((window.monaco || window.Monaco) && (window.monaco || window.Monaco).editor) || document.querySelector('.monaco-editor, .my-monaco-editor, .ace_editor, textarea.editor-input, .xterm'));
+                    const hasQuestions = !!document.querySelector('.subject-item, .question-item, .blank-question, .single-choice, .exercise-item');
+                    return hasMonaco || hasQuestions;
+                }"""
             )
             if ev_res:
-                has_monaco = True
+                has_task_content = True
         except Exception:
             pass
 
-    if not has_monaco and hasattr(page, "query_selector"):
+    if not has_task_content and hasattr(page, "query_selector"):
         try:
-            if page.query_selector(".monaco-editor, .my-monaco-editor"):
-                has_monaco = True
+            if page.query_selector(".monaco-editor, .my-monaco-editor, .ace_editor, .xterm, .subject-item, .question-item"):
+                has_task_content = True
         except Exception:
             pass
 
     # 若已是真正的 IDE 界面且 URL 不含 /detail，无需穿透
-    if not is_detail_url and has_monaco:
+    if not is_detail_url and has_task_content:
         return page
 
     # 寻找内层挑战按钮
@@ -132,6 +146,37 @@ def penetrate_detail_springboard(page: Page, context: Any = None) -> Page:
                     break
         except Exception:
             continue
+
+    # 兜底 locator 搜索
+    if not inner_btn and hasattr(page, "locator"):
+        for kw in ["开启挑战", "继续挑战", "开始实训", "进入实训", "立即实训", "开始挑战", "开始答题", "去完成", "开始学习"]:
+            try:
+                loc = page.locator(f"button:has-text('{kw}'), a:has-text('{kw}'), div[role='button']:has-text('{kw}')").first
+                if loc and loc.count() > 0 and loc.is_visible():
+                    inner_btn = loc.element_handle()
+                    break
+            except Exception:
+                pass
+
+    # 兜底 JS 语义深层查找
+    if not inner_btn and hasattr(page, "evaluate_handle"):
+        try:
+            js_h = page.evaluate_handle("""() => {
+                const kws = ['开启挑战', '继续挑战', '开始实训', '进入实训', '立即实训', '开始挑战', '开始答题', '去完成'];
+                const candidates = document.querySelectorAll('button, a, div[role="button"], [class*="btn"], span');
+                for (const el of candidates) {
+                    const txt = (el.innerText || el.textContent || '').trim();
+                    if (kws.some(k => txt === k || txt.startsWith(k))) {
+                        const style = window.getComputedStyle(el);
+                        if (!style || (style.display !== 'none' && style.visibility !== 'hidden')) return el;
+                    }
+                }
+                return null;
+            }""")
+            if js_h and js_h.as_element():
+                inner_btn = js_h.as_element()
+        except Exception:
+            pass
 
     # 若未找到内层按钮，无法穿透，直接返回
     if not inner_btn:
@@ -180,6 +225,14 @@ def penetrate_detail_springboard(page: Page, context: Any = None) -> Page:
 
     random_delay(0.5, 1.0)
     dismiss_blocking_overlays(page)
+
+    # 自动执行多关卡回退对齐检测：若停在后置关卡则自动对齐到第 1 关
+    try:
+        from src.executor.stage_navigator import align_to_first_uncompleted_stage
+        align_to_first_uncompleted_stage(page)
+    except Exception as se:
+        logger.debug(f"详情页穿透后关卡对齐异常 (安全忽略): {se}")
+
     return page
 
 

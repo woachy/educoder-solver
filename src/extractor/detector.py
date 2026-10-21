@@ -18,6 +18,7 @@ from src.extractor.base import (
 )
 from src.extractor.blank import BlankExtractor
 from src.extractor.choice import ChoiceExtractor
+from src.extractor.paper import PaperExtractor
 from src.extractor.practical import PracticalExtractor
 from src.utils.logger import logger
 
@@ -38,11 +39,17 @@ def detect_question_type(page_or_html: Any) -> QuestionType:
             logger.info("题型探测结果: 编程实训题 (PRACTICAL)")
             return QuestionType.PRACTICAL
 
+        # 2. 探测试卷型 / 复合连排客观与填空题 (多道题目并列或混合客观填空)
+        paper_extractor = PaperExtractor()
+        if paper_extractor.can_extract(page_or_html):
+            logger.info("题型探测结果: 试卷型/复合客观填空题 (EXAM_PAPER)")
+            return QuestionType.EXAM_PAPER
+
         html = get_page_html(page_or_html)
         soup = BeautifulSoup(html, "html.parser")
         text = soup.get_text()
 
-        # 2. 探测客观题 (单选 / 多选 / 判断)
+        # 3. 探测单道客观题 (单选 / 多选 / 判断)
         choice_extractor = ChoiceExtractor()
         if choice_extractor.can_extract(page_or_html):
             # 细分客观题子类型
@@ -67,7 +74,7 @@ def detect_question_type(page_or_html: Any) -> QuestionType:
             logger.info("题型探测结果: 单选题 (CHOICE)")
             return QuestionType.CHOICE
 
-        # 3. 探测填空题
+        # 4. 探测单道填空题
         blank_extractor = BlankExtractor()
         if blank_extractor.can_extract(page_or_html):
             logger.info("题型探测结果: 填空题 (BLANK)")
@@ -244,7 +251,14 @@ def extract_question(page_or_html: Any, force_type: Optional[QuestionType] = Non
 
     target_type = force_type or detect_question_type(page_or_html)
 
-    if target_type in (QuestionType.CHOICE, QuestionType.MULTIPLE_CHOICE, QuestionType.JUDGMENT):
+    if target_type == QuestionType.EXAM_PAPER:
+        extractor = PaperExtractor()
+        data = extractor.extract(page_or_html)
+        if force_type:
+            data.type = force_type
+        return data
+
+    elif target_type in (QuestionType.CHOICE, QuestionType.MULTIPLE_CHOICE, QuestionType.JUDGMENT):
         extractor = ChoiceExtractor()
         data = extractor.extract(page_or_html)
         # 保持与指定类型或探测类型一致
@@ -261,9 +275,9 @@ def extract_question(page_or_html: Any, force_type: Optional[QuestionType] = Non
         return extractor.extract(page_or_html)
 
     else:
-        # UNKNOWN 类型兜底：尝试依次用 Choice -> Blank -> Practical 抽取
+        # UNKNOWN 类型兜底：尝试依次用 Paper -> Choice -> Blank -> Practical 抽取
         logger.info("未识别题型，尝试通用抽取兜底...")
-        for ext in [ChoiceExtractor(), BlankExtractor(), PracticalExtractor()]:
+        for ext in [PaperExtractor(), ChoiceExtractor(), BlankExtractor(), PracticalExtractor()]:
             try:
                 if ext.can_extract(page_or_html):
                     return ext.extract(page_or_html)

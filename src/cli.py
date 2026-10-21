@@ -39,7 +39,14 @@ from src.executor.editor_action import inject_code
 from src.executor.eval_action import EvaluationManager
 from src.executor.modal_sweeper import dismiss_blocking_overlays
 from src.executor.pacing import pacing_controller
+from src.executor.paper_action import submit_paper_answers
 from src.executor.pipeline import run_solve_cycle
+from src.executor.stage_navigator import (
+    align_to_first_uncompleted_stage,
+    detect_stage_topology,
+    navigate_to_stage,
+    trigger_prev_stage,
+)
 from src.executor.terminal_action import inject_terminal_command, read_terminal_output
 from src.extractor.base import QuestionData, QuestionType
 from src.extractor.detector import extract_question
@@ -151,8 +158,10 @@ def cmd_dump_question(args: argparse.Namespace) -> None:
     try:
         with BrowserSession() as session:
             page = session.get_target_page(keyword, prefer_type="shixun")
+            stage_info = detect_stage_topology(page)
             q_data: QuestionData = extract_question(page, force_type=force_type)
             result_dict = q_data.to_dict()
+            result_dict["stage_info"] = stage_info
 
             # 智能打卡: 当识别到实训题/代码题时，若当前关卡尚未打卡，自动打卡记录时间戳
             if q_data.type == QuestionType.PRACTICAL or getattr(q_data, "practical_details", None) is not None:
@@ -177,6 +186,7 @@ def cmd_dump_question(args: argparse.Namespace) -> None:
             panel_content = [
                 f"[bold cyan]题型:[/bold cyan] {q_data.type.value}",
                 f"[bold cyan]标题:[/bold cyan] {q_data.title}",
+                f"[bold cyan]关卡拓扑:[/bold cyan] 第 {stage_info.get('current_stage', 1)}/{stage_info.get('total_stages', 1)} 关 (可回退上一关: {'是' if stage_info.get('has_prev') else '否'})",
             ]
             if q_data.description:
                 desc_preview = q_data.description[:300] + ("..." if len(q_data.description) > 300 else "")
@@ -184,7 +194,23 @@ def cmd_dump_question(args: argparse.Namespace) -> None:
 
             console.print(Panel("\n".join(panel_content), title="题目基本感知", border_style="blue"))
 
-            if q_data.options:
+            # 试卷型 / 复合大题子题目表格呈现
+            if q_data.sub_questions:
+                paper_table = Table(title=f"试卷子题目列表 (共 {len(q_data.sub_questions)} 道)")
+                paper_table.add_column("序号", justify="center", style="cyan")
+                paper_table.add_column("子题型", style="yellow")
+                paper_table.add_column("子题干/说明", style="white")
+                paper_table.add_column("选项/槽位", justify="center")
+                paper_table.add_column("LaTeX公式", style="magenta")
+
+                for sq in q_data.sub_questions:
+                    item_type = sq.type.value if hasattr(sq.type, "value") else str(sq.type)
+                    items_desc = f"{len(sq.options)} 选项" if sq.options else (f"{len(sq.blanks)} 空位" if sq.blanks else "-")
+                    formulas_preview = ", ".join(sq.latex_formulas[:2]) if sq.latex_formulas else "-"
+                    paper_table.add_row(str(sq.index), item_type, sq.title[:40], items_desc, formulas_preview[:30])
+                console.print(paper_table)
+
+            if q_data.options and not q_data.sub_questions:
                 opt_table = Table(title="选项列表")
                 opt_table.add_column("选项", justify="center", style="cyan")
                 opt_table.add_column("内容", style="white")
@@ -194,7 +220,7 @@ def cmd_dump_question(args: argparse.Namespace) -> None:
                     opt_table.add_row(opt.id, opt.text, sel_str)
                 console.print(opt_table)
 
-            if q_data.blanks:
+            if q_data.blanks and not q_data.sub_questions:
                 blank_table = Table(title="填空槽位")
                 blank_table.add_column("序号", justify="center", style="cyan")
                 blank_table.add_column("提示", style="yellow")
@@ -412,6 +438,9 @@ def cmd_submit_answer(args: argparse.Namespace) -> None:
     elif q_type == "blank":
         fake_args = argparse.Namespace(answers=data_content, json=json_mode)
         cmd_submit_blank(fake_args)
+    elif q_type in ("paper", "exam_paper"):
+        fake_args = argparse.Namespace(answers=data_content, file=None, eval=False, timeout=60, json=json_mode)
+        cmd_submit_paper(fake_args)
     elif q_type in ("code", "practical"):
         fake_args = argparse.Namespace(code=data_content, file=None, full=args.full, json=json_mode)
         cmd_inject_code(fake_args)
@@ -419,12 +448,127 @@ def cmd_submit_answer(args: argparse.Namespace) -> None:
         fake_args = argparse.Namespace(cmd=data_content, no_enter=False, read=False, eval=False, timeout=60, json=json_mode)
         cmd_submit_terminal(fake_args)
     else:
-        err = {"status": "error", "message": f"未知题目类型: {q_type}，支持 [choice|blank|code|terminal]"}
+        err = {"status": "error", "message": f"未知题目类型: {q_type}，支持 [choice|blank|paper|code|terminal]"}
         if json_mode:
             print_json_result(err, exit_code=1)
         else:
             console.print(f"[bold red]错误：{err['message']}[/bold red]")
             sys.exit(1)
+
+
+def cmd_submit_paper(args: argparse.Namespace) -> None:
+    """批量提交试卷型与复合客观/填空题答案"""
+    json_mode = args.json or config.log.json_mode
+    raw_answers = ""
+
+    if getattr(args, "file", None):
+        file_path = Path(args.file).resolve()
+        if not file_path.exists():
+            err = {"status": "error", "message": f"指定答案文件不存在: {file_path}"}
+            if json_mode:
+                print_json_result(err, exit_code=1)
+            else:
+                console.print(f"[bold red]错误：答案文件不存在: {file_path}[/bold red]")
+                sys.exit(1)
+        with open(file_path, "r", encoding="utf-8") as f:
+            raw_answers = f.read()
+    elif getattr(args, "answers", None) is not None:
+        raw_answers = args.answers
+    else:
+        err = {"status": "error", "message": "必须提供 --answers 或 --file 参数"}
+        if json_mode:
+            print_json_result(err, exit_code=1)
+        else:
+            console.print("[bold red]错误：必须提供 --answers 或 --file 参数[/bold red]")
+            sys.exit(1)
+
+    auto_eval = getattr(args, "eval", False)
+    timeout = getattr(args, "timeout", 60) or 60
+    keyword = getattr(args, "match", None) or config.browser.target_domain
+
+    try:
+        with BrowserSession() as session:
+            page = session.get_target_page(keyword, prefer_type="shixun", auto_penetrate=True)
+            res = submit_paper_answers(page, raw_answers, auto_eval=auto_eval, timeout=timeout)
+
+            if json_mode:
+                print_json_result(res)
+            else:
+                status_color = "green" if res.get("status") == "success" else "yellow"
+                console.print(
+                    Panel(
+                        f"[{status_color}]{res.get('message')}[/{status_color}]\n"
+                        f"成功填写: {res.get('success_count')}/{res.get('total_submitted')}",
+                        title="试卷型大题批量作答回执",
+                        border_style=status_color,
+                    )
+                )
+                if res.get("eval_result"):
+                    ev = res["eval_result"]
+                    ev_color = "green" if ev.get("passed") else "red"
+                    console.print(Panel(f"[{ev_color}]评测结论: {ev.get('message')}[/{ev_color}]\n通过率: {ev.get('pass_ratio')}", title="评测回执", border_style=ev_color))
+    except Exception as e:
+        _handle_connection_error(e, json_mode)
+
+
+def cmd_navigate_stage(args: argparse.Namespace) -> None:
+    """关卡拓扑感知与按序导航/回退"""
+    json_mode = args.json or config.log.json_mode
+    keyword = getattr(args, "match", None) or config.browser.target_domain
+
+    try:
+        with BrowserSession() as session:
+            page = session.get_target_page(keyword, prefer_type="shixun", auto_penetrate=True)
+
+            if getattr(args, "align_first", False):
+                res = align_to_first_uncompleted_stage(page)
+                if json_mode:
+                    print_json_result(res)
+                else:
+                    console.print(
+                        Panel(
+                            f"[bold green]关卡自动回退对齐已完成[/bold green]\n"
+                            f"初始关卡: 第 {res.get('initial_stage')} 关\n"
+                            f"当前关卡: 第 {res.get('current_stage')} 关\n"
+                            f"回退步数: {res.get('rollbacks_performed')}",
+                            title="多关卡回退对齐",
+                            border_style="green",
+                        )
+                    )
+            elif getattr(args, "prev", False):
+                ok = trigger_prev_stage(page)
+                res = {"status": "success" if ok else "failed", "action": "prev_stage", "success": ok}
+                if json_mode:
+                    print_json_result(res)
+                else:
+                    color = "green" if ok else "yellow"
+                    console.print(Panel(f"[{color}]点击‘上一关’: {'成功' if ok else '未找到上一关或点击失败'}[/{color}]", title="关卡回退", border_style=color))
+            elif getattr(args, "target", None) is not None:
+                tgt = args.target
+                ok = navigate_to_stage(page, tgt)
+                res = {"status": "success" if ok else "failed", "action": "navigate_to_stage", "target_stage": tgt, "success": ok}
+                if json_mode:
+                    print_json_result(res)
+                else:
+                    color = "green" if ok else "red"
+                    console.print(Panel(f"[{color}]导航至第 {tgt} 关: {'成功' if ok else '失败'}[/{color}]", title="关卡跳转", border_style=color))
+            else:
+                topo = detect_stage_topology(page)
+                if json_mode:
+                    print_json_result(topo)
+                else:
+                    console.print(
+                        Panel(
+                            f"当前关卡: [bold cyan]第 {topo.get('current_stage')} 关[/bold cyan]\n"
+                            f"总关卡数: [bold cyan]{topo.get('total_stages')}[/bold cyan]\n"
+                            f"可回退上一关: {'[green]是[/green]' if topo.get('has_prev') else '[dim]否[/dim]'}\n"
+                            f"存在下一关: {'[green]是[/green]' if topo.get('has_next') else '[dim]否[/dim]'}",
+                            title="关卡拓扑感知",
+                            border_style="cyan",
+                        )
+                    )
+    except Exception as e:
+        _handle_connection_error(e, json_mode)
 
 
 def cmd_submit_terminal(args: argparse.Namespace) -> None:
@@ -765,10 +909,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 7. submit-answer (综合命令，兼容 AGENTS.md 规范)
     p_answer = subparsers.add_parser("submit-answer", help="综合答题接口 (按题型路由)")
-    p_answer.add_argument("--type", required=True, choices=["choice", "blank", "code", "practical", "terminal"], help="题型")
+    p_answer.add_argument(
+        "--type",
+        required=True,
+        choices=["choice", "multiple_choice", "judgment", "blank", "paper", "exam_paper", "code", "practical", "terminal"],
+        help="题型",
+    )
     p_answer.add_argument("--data", required=True, help="答案数据 (文本、JSON 或文件路径)")
     p_answer.add_argument("--full", action="store_true", help="代码题是否全量覆盖")
     p_answer.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
+    # 7.1 submit-paper (试卷型 / 复合客观填空题批量提交)
+    p_paper = subparsers.add_parser("submit-paper", help="批量提交试卷型与复合客观/填空题的所有子题目答案")
+    paper_group = p_paper.add_mutually_exclusive_group(required=True)
+    paper_group.add_argument("--answers", help="答案 JSON 映射字符串 (如 '{\"1\": \"A\", \"2\": [\"ans1\"]}')")
+    paper_group.add_argument("--file", help="答案 JSON 文件路径")
+    p_paper.add_argument("--eval", action="store_true", help="填写完成后自动触发评测监听")
+    p_paper.add_argument("--timeout", type=int, default=60, help="评测等待超时 (秒，默认 60)")
+    p_paper.add_argument("--match", "-m", help="指定目标页面的 URL 或标题匹配关键字")
+    p_paper.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
+    # 7.2 navigate-stage (关卡拓扑感知与按序导航/回退)
+    p_stage = subparsers.add_parser("navigate-stage", help="关卡拓扑感知、回退上一关或按序多关卡对齐")
+    p_stage.add_argument("--target", type=int, default=None, help="直达指定关卡序号 (1-indexed)")
+    p_stage.add_argument("--prev", action="store_true", help="点击‘上一关’按钮回退")
+    p_stage.add_argument("--align-first", action="store_true", help="自动检测并回退对齐至首个未完成关卡 (第 1 关)")
+    p_stage.add_argument("--match", "-m", help="指定目标页面的 URL 或标题匹配关键字")
+    p_stage.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
     # 8. solve-cycle (复合答题流水线)
     p_cycle = subparsers.add_parser("solve-cycle", help="复合流水线：清理弹窗 -> 注入代码 -> 两阶段评测 -> 提纯Diff反馈")
@@ -839,6 +1006,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         "inject-code": cmd_inject_code,
         "trigger-eval": cmd_trigger_eval,
         "submit-answer": cmd_submit_answer,
+        "submit-paper": cmd_submit_paper,
+        "navigate-stage": cmd_navigate_stage,
         "submit-terminal": cmd_submit_terminal,
         "solve-cycle": cmd_solve_cycle,
         "list-tasks": cmd_list_tasks,

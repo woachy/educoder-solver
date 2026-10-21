@@ -20,7 +20,14 @@ from src.executor.editor_action import (
 )
 from src.executor.eval_action import EvaluationManager
 from src.executor.modal_sweeper import dismiss_blocking_overlays
+from src.executor.paper_action import submit_paper_answers
 from src.executor.pipeline import run_solve_cycle
+from src.executor.stage_navigator import (
+    align_to_first_uncompleted_stage,
+    detect_stage_topology,
+    navigate_to_stage,
+    trigger_prev_stage,
+)
 from src.executor.terminal_action import (
     inject_terminal_command,
     read_terminal_output,
@@ -29,6 +36,7 @@ from src.executor.terminal_action import (
 __all__ = [
     "submit_choice_answer",
     "submit_blank_answer",
+    "submit_paper_answers",
     "inject_code",
     "backup_code_to_file",
     "assemble_target_code",
@@ -36,6 +44,10 @@ __all__ = [
     "dismiss_blocking_overlays",
     "extract_testcase_diff",
     "run_solve_cycle",
+    "detect_stage_topology",
+    "trigger_prev_stage",
+    "navigate_to_stage",
+    "align_to_first_uncompleted_stage",
     "inject_terminal_command",
     "read_terminal_output",
 ]

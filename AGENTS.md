@@ -3,18 +3,20 @@
 ## 1. 项目定位与技术栈 (Project & Stack)
 - **项目目标**：通过本地 CDP (Chrome DevTools Protocol) 挂载物理浏览器接管头歌平台，由本地 AI 代理直接闭环进行“感知-推理-控速-答题-自愈-巡航”，严禁依赖外部付费 API。
 - **技术栈**：Python 3.12+ / Playwright (CDP Remote Debugging) / BeautifulSoup4 / Rich / Argparse / Pytest
-- **架构版本**：v4.1.0 (支持标签页智能解耦 prefer_type、隐形字符/行尾空格高敏 Diff、SPA 加载态防抖自愈 wait_for_spa_loading、空白题显式感知 is_blank_slate、多 Tab 自动回收 cleanup_old_task_pages、Pacing 跨进程持久化思考控速防秒刷、Classroom Orchestrator 跳板自动穿透、React SPA 深度 Fiber 真实保存、全局 Monaco 大小写兼容、题干表格 Markdown 结构化、CDP 网络层评测拦截)
+- **架构版本**：v4.2.0 (支持页面三态解耦与定向路由 prefer_type、跳板详情页自动穿透与开启挑战覆盖、试卷型复合客观/填空长卷解析 EXAM_PAPER、多关卡拓扑感知与自动回退 stage_navigator、评测按钮动态哈希混淆与深层语义兼容、隐形字符/行尾空格高敏 Diff、SPA 加载态防抖自愈 wait_for_spa_loading、空白题显式感知 is_blank_slate、多 Tab 自动回收 cleanup_old_task_pages、Pacing 跨进程持久化思考控速防秒刷、React SPA 深度 Fiber 真实保存、全局 Monaco 大小写兼容、题干表格 Markdown 结构化、CDP 网络层评测拦截)
 - **依赖管理**：推荐使用专用 venv (`.venv`) 与 `pip`。
 
 ## 2. 核心指令 (Core Commands)
 - **环境初始化**：`python -m venv .venv; .\.venv\Scripts\activate; pip install -r requirements.txt`
 - **Playwright 安装**：`playwright install chromium`（仅备用，主流程挂载本机 9222 端口无需下载大浏览器）
 - **浏览器端口探针**：`python -m src.cli check-browser`
-- **页面检测与题目提取**：`python -m src.cli dump-question` (支持 SPA 加载防抖自愈与 `is_blank_slate` 感知)
+- **页面检测与题目提取**：`python -m src.cli dump-question` (支持 SPA 加载防抖自愈、`is_blank_slate` 感知与试卷型 `EXAM_PAPER` 复合多题结构化提取)
+- **试卷型大题批量提交**：`python -m src.cli submit-paper --answers '{"1": "A", "2": "C", "3": ["formula1"]}' [--eval] --json`
+- **关卡拓扑感知与导航对齐**：`python -m src.cli navigate-stage [--align-first] [--prev] [--target <N>] --json`
 - **课堂大作业推进 (双模式支持)**：
   - **模式 1 (AI Agent 单步原子流，短连接 Agent 强烈首选)**：
-    - 列表只读扫描：`python -m src.cli list-tasks [--match <keyword>] --json` (自动 prefer_type=classroom)
-    - 单步开启大题 (含跳板穿透、旧Tab回收与持久打卡)：`python -m src.cli open-task [--index <N>] [--match <keyword>] --json`
+    - 列表只读扫描：`python -m src.cli list-tasks [--match <keyword>] --json` (自动 prefer_type=classroom，精准排除 /detail)
+    - 单步开启大题 (含跳板穿透“开启挑战”、旧Tab回收与持久打卡)：`python -m src.cli open-task [--index <N>] [--match <keyword>] --json`
     - 关卡闭环作答 (含跨进程控速、真实保存与可选通关关Tab)：`python -m src.cli solve-cycle --code "<target_code>" [--file <path>] [--close-on-complete] --auto-next [--min-duration 60] --json`
   - **模式 2 (长连接双向协程流，带 30s 超时保护)**：
     - 交互式全自动巡航：`python -m src.cli run-classroom-homework [--max-tasks 10] [--min-duration 60] [--dry-run] [--interactive] [--match <keyword>] --json`
@@ -22,9 +24,10 @@
 - **分步下发答题动作**：
   - 客观题：`python -m src.cli submit-choice --options A,C --json`
   - 填空题：`python -m src.cli submit-blank --answers '["答案1", "答案2"]' --json`
+  - 试卷/复合题：`python -m src.cli submit-paper --answers '{"1": "C", "2": "B"}' --eval --json`
   - 代码注入：`python -m src.cli inject-code --code "<code_str>" --json`
   - 评测监听：`python -m src.cli trigger-eval [--timeout 60] [--auto-next] --json`
-  - 统一入口：`python -m src.cli submit-answer --type [choice|blank|code] --data <json_or_file>`
+  - 统一入口：`python -m src.cli submit-answer --type [choice|blank|code|paper] --data <json_or_file>`
 - **自动化测试**：`python -m pytest`
 - **代码静态检查**：`python -m flake8 src/` 或 `python -m ruff check src/`
 
@@ -32,12 +35,15 @@
 
 ### Always do (强制执行)
 - **端口前置探活**：任何浏览器操作前，必须校验 `localhost:9222` 可达性，如未开启提示用户运行启动脚本。
-- **标签页场景智能定向匹配准则**：在调度浏览器页面时必须遵循职责解耦：列表扫描与大题开启优先命中作业列表页 (`prefer_type='classroom'`)，关卡提取与代码评测优先命中实训关卡页 (`prefer_type='shixun'`)，杜绝上一题做完后因仍处于实训 Tab 导致切回列表失败。
-- **课堂大作业官方命令链准则**：在面对整门课作业列表页面时，**必须使用官方命令链推进**：一问一答型短连接 AI Agent 优先使用单步原子流（`list-tasks` 扫描列表 -> `open-task` 激活新 Tab -> `dump-question` 感知题目 -> `solve-cycle` 闭环做题）；具备实时双向 stdio 管道的外部进程方可使用 `run-classroom-homework --interactive`。
+- **页面三态精准解耦与定向路由准则**：在调度浏览器页面时必须遵循三态职责解耦：大题列表页 (`prefer_type='classroom'`，排他性排除 `/detail` 与 `/tasks/`)、跳板详情页 (`prefer_type='springboard'`，匹配 `/detail` 或仅有挑战按钮的大纲页)、实训做题关卡页 (`prefer_type='shixun'`，优先匹配包含 Monaco 或试卷题型的真正答题页)。
+- **跳板详情页全自动穿透与业务文案强覆盖**：开启大题命中 `/detail?tabs=` 跳板介绍页时，必须通过 `penetrate_detail_springboard` 自动点击“开启挑战/继续挑战/开始实训/开始答题/去完成”等变体文案穿透至真正做题关卡，关闭前置跳板页与此前已通关的旧关卡 Tab；核心入口开启 `auto_penetrate=True` 确保直接直达。
+- **试卷型大题长卷与复合客观/填空题感知准则 (EXAM_PAPER)**：遇到无 Monaco 但包含多道单选、多选或填空（含 LaTeX 公式填空）的长卷页面，必须通过 `PaperExtractor` 结构化提取 `SubQuestion` 列表，严禁误判为未知或空代码实训题；批量答题使用 `submit-paper` 一键注入选项与槽位。
+- **评测按钮多态混淆与深层语义兼容**：定位评测/提交按钮时，必须全面覆盖类名哈希混淆（`button[class*='btn-run']` 如 `.btn-run___fh7pl`）、属性标签（`[title*='运行评测']`）、内嵌标签（`button:has(b:has-text('评测'))`）及 JS 深度语义检索，且支持 3 秒缓冲重试，防止 React 异步渲染造成定位落空。
+- **多关卡拓扑感知与自动回退对齐**：当大题包含多个关卡（如 0/2）且浏览器默认停留在后置关卡时，必须通过 `align_to_first_uncompleted_stage` 或 `navigate-stage --align-first` 检测前序未完成关卡并自动对齐到第 1 关顺序推进。
+- **课堂大作业官方命令链准则**：在面对整门课作业列表页面时，**必须使用官方命令链推进**：一问一答型短连接 AI Agent 优先使用单步原子流（`list-tasks` 扫描列表 -> `open-task` 激活新 Tab -> `dump-question` 感知题目 -> `solve-cycle` / `submit-paper` 闭环做题）；具备实时双向 stdio 管道的外部进程方可使用 `run-classroom-homework --interactive`。
 - **React Fiber 真实保存与 Git 提交闭环**：代码注入必须穿透 React Fiber 调用 `ed.onChange` 与 `ed.onSave` 并提取后端 `commitID`，配合 `Ctrl+S` 键盘双重兜底，确保回执 `saved == true` 且云端代码真实同步后方可触发评测，彻底根除评测沙箱拉取到空代码或初始模板的致命缺陷。
 - **防秒刷控速与跨进程打卡持久化 (Anti-Cheat Pacing & Persistence)**：严禁单关卡毫秒级秒刷触发教师端审查与平台风控！单关提交必须经过智能控速（默认 `--min-duration 60` 配合 `5~20s` 拟真离散抖动）。开题打卡时间戳必须原子持久化至 `.cache/pacing_state.json`，在短连接 CLI 模式下精准扣除已耗时，通关自动清理缓存记录；等待期间注入微滚动保活心跳（每 15s），本地快速自测或明确极速要求方可传 `0`。
 - **隐形字符与行尾空格高敏识别**：比对评测输出时，若文本内容一致但存在空白/换行字符不匹配，必须生成 repr 级别的行尾空格精准差异提示，严禁误报为“输出与预期一致”误导决策。
-- **跳板详情页自动穿透与旧 Tab 回收**：开启大题命中 `/detail?tabs=` 跳板介绍页时，必须通过 `penetrate_detail_springboard` 自动点击“开始实训/继续挑战”直接穿透至真正 IDE 关卡并安全关闭跳板页与此前已通关的旧关卡 Tab，防止 Chrome 内存无限膨胀。
 - **SPA 加载态防抖与空白题感知**：关卡感知时必须调用 `wait_for_spa_loading` 过滤“努力请求数据中..”等瞬态抖动；若编辑器无初始模板，显式输出 `is_blank_slate: true` 指引 AI 全量注入。
 - **实训优先复合流水线**：实训题作答优先使用 `solve-cycle` 单次会话流水线，将“弹窗清理-Monaco穿透注入与保存-控速等待-网络层/DOM双轨评测-Diff提纯-流转”收敛在单次 CDP 进程内，杜绝多次进程冷启动开销。
 - **题干表格结构化与低熵多模态准则**：遇到页面中的 `<table>` 必须通过 `table_to_markdown` 转为紧凑的 Markdown 表格嵌入题干，图片仅保留结构化引用（如 `[附图说明: xxx]`），严禁向大模型吐出未经清洗的大段 base64 乱码或原始 HTML 噪音。

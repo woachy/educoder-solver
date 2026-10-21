@@ -325,11 +325,45 @@ Windows 推荐执行命令前缀：`.\.venv\Scripts\python -m src.cli`
 ### 2.8 分步触发评测与状态监听 (`trigger-eval`)
 
 ```powershell
-# 触发评测并等待回执 (双轨拦截优先)
+# 触发评测并等待回执 (双轨拦截优先，具备 3 秒缓冲重试与动态混淆类名 .btn-run 兼容)
 .\.venv\Scripts\python -m src.cli trigger-eval --timeout 60 --json
 
 # 评测通过后自动流转下一关
 .\.venv\Scripts\python -m src.cli trigger-eval --auto-next --json
+```
+
+---
+
+### 2.9 提交试卷型复合大题/长卷 (`submit-paper` - v4.2)
+
+针对多题连排的复合客观题长卷、混合填空（如 LaTeX 关系代数公式填空）或未挂载 Monaco 编辑器的整卷题型：
+
+```powershell
+# 批量填写试卷型题目答案并直接触发评测
+.\.venv\Scripts\python -m src.cli submit-paper --answers '{"1": "C", "2": "B", "3": "C", "4": "C", "5": "A"}' --eval --json
+
+# 混合题型 (单选题 + 填空题槽位列表)
+.\.venv\Scripts\python -m src.cli submit-paper --answers '{"1": "B", "2": "C", "3": ["\\textstyle\\prod_{Tage}(Teacher)", "T1", "dept"]}' --eval --json
+
+# 从 JSON 文件载入答案
+.\.venv\Scripts\python -m src.cli submit-paper --file ./answers.json --eval --json
+```
+
+---
+
+### 2.10 关卡拓扑感知与按序导航 (`navigate-stage` - v4.2)
+
+当大题存在多个关卡（例如 0/2），且浏览器默认停留在后置关卡时，进行状态回溯与对齐：
+
+```powershell
+# 自动检测并回退对齐到首个未完成关卡 (如第 1 关)
+.\.venv\Scripts\python -m src.cli navigate-stage --align-first --json
+
+# 点击“上一关”回退
+.\.venv\Scripts\python -m src.cli navigate-stage --prev --json
+
+# 直接导航跳转至指定序号关卡 (1-indexed)
+.\.venv\Scripts\python -m src.cli navigate-stage --target 1 --json
 ```
 
 ---
@@ -382,7 +416,10 @@ Windows 推荐执行命令前缀：`.\.venv\Scripts\python -m src.cli`
 | `check-browser` 提示 `cdp_available: false` | 物理浏览器未开启 9222 调试端口 | 提示用户在终端运行 `.\scripts\launch_browser.ps1` |
 | 执行巡航命令时进程挂住/死锁 | 交互模式 (`--interactive`) 卡在等待 stdin，但 Agent 属于一问一答短连接调用 | 系统已内置 30s 超时看门狗自动释放退出；**强烈推荐换用单步原子流（`list-tasks` -> `open-task` -> `solve-cycle`）**，彻底避免长连接死锁 |
 | `list-tasks` 扫描到 0 道大题 / 空跑 | 浏览器停留在 `/classrooms` 班级总览页而非作业列表页，或打开了多个干扰标签页 | 使用 `--match` 参数精确指定作业页面关键词，如 `list-tasks --match homework --json`，或请用户点进具体作业列表 |
-| `open-task` 停留在 `/detail?tabs=` 详情页无法直接做题 | 部分大题包含前置实训介绍跳板页，未直接进入 IDE 编程关卡 | v4.0 内置 `penetrate_detail_springboard` 自动穿透机制，检测到跳板页自动点击“开始实训/继续挑战”直达 IDE，并安全关闭中间页，无需 Agent 二次开题 |
+| `open-task` 停留在 `/detail?tabs=` 详情页无法直接做题 | 部分大题包含前置实训介绍跳板页，且按钮文案为“开启挑战/开始答题”等新变体 | v4.2 已全面覆盖“开启挑战”、“继续挑战”、“开始答题”等全量变体，配合 `auto_penetrate=True` 自动穿透并安全关闭跳板页，直达真正关卡 IDE |
+| 评测或提交报错 `页面中未定位到评测或提交按钮` | 评测按钮使用了动态 CSS Modules 类名混淆 (如 `.btn-run___fh7pl`) 或内嵌 `<b>评测</b>` | v4.2 定位器已全面扩充覆盖 `[class*='btn-run']`、`[title*='运行评测']`、内嵌 `<b>` 与 JS 深度语义检索，且支持 3 秒缓冲重试 |
+| 遇到多题连排客观题长卷或 LaTeX 公式填空 (如关系数据库) | 原系统仅假设单题模式或 Monaco 代码题，无法解析复合试卷长卷 | v4.2 新增 `EXAM_PAPER` 题型与 `PaperExtractor` 模块，提取 `sub_questions` 列表与公式提示，并通过 `submit-paper` 批量勾选选项与填写槽位 |
+| 开启多关卡大题 (如 0/2) 时停留在后置第 2 关 | 平台记录了上次停留位置，导致首关未完成即跳到后置关卡 | v4.2 新增 `stage_navigator` 与 `navigate-stage --align-first`，穿透跳板后自动探测关卡拓扑并对齐至首个未完成关卡 |
 | 短连接 CLI 模式下每道题重复盲等 60s+ 甚至 75s+ | 短连接模式下进程退出导致开题打卡内存丢失，误以为刚刚开题 | v4.0 引入 `.cache/pacing_state.json` 跨进程打卡持久化，`open-task` 与 `dump-question` 自动打卡，`solve-cycle` 精确计算并扣减思考已耗时，超时则 0 秒直出 |
 | 评测结果显示实际输出为空 / 初始模板代码未生效 | 头歌 React SPA 状态未同步，未向平台 Git 提交代码 | v4.0 已实现 React Fiber 深度穿透：注入时显式调用 `ed.onChange` 与 `ed.onSave` 并提取 `commit_id`，配合 `Ctrl+S` 双重兜底，确保代码真正持久化至后端 Git 仓库后再评测 |
 | 编辑器无法识别或提示 `window.Monaco` 报错 | 部分关卡打包配置使用首字母大写 `window.Monaco` 或类名 `.my-monaco-editor` | v4.0 已全面兼容 `window.monaco || window.Monaco` 及容器类名 `.monaco-editor, .my-monaco-editor`，支持跨 Frames 与 Fiber 穿透识别 |

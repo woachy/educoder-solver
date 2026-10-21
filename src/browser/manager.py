@@ -42,6 +42,57 @@ def check_cdp_available(host: Optional[str] = None, port: Optional[int] = None, 
         return False
 
 
+def is_classroom_page(p: Page) -> bool:
+    """判定页面是否为课堂作业列表页 (排除 /detail 跳板与关卡页)"""
+    try:
+        import re
+        u = getattr(p, "url", "")
+        if not isinstance(u, str) or "educoder.net" not in u.lower():
+            return False
+        u = u.lower()
+        if "/detail" in u or "/tasks/" in u or "/challenges" in u:
+            return False
+        return bool("/shixun_homework" in u or "/homeworks" in u or re.search(r"/classrooms/\d+", u))
+    except Exception:
+        return False
+
+
+def is_springboard_page(p: Page) -> bool:
+    """判定页面是否为实训跳板详情页 (/detail 或仅有开启挑战按钮的介绍大纲页)"""
+    try:
+        u = getattr(p, "url", "")
+        if not isinstance(u, str) or "educoder.net" not in u.lower():
+            return False
+        u = u.lower()
+        if "/classrooms" in u or "/shixun_homework" in u or "/homeworks" in u:
+            return False
+        if "/tasks/" in u or "/challenges" in u:
+            return False
+        if "/detail" in u:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def is_shixun_task_page(p: Page) -> bool:
+    """判定页面是否为真正的实训做题关卡页 (包含编辑器或答题容器，排除列表与跳板)"""
+    try:
+        u = getattr(p, "url", "")
+        if not isinstance(u, str) or "educoder.net" not in u.lower():
+            return False
+        u = u.lower()
+        if "/classrooms" in u or "/shixun_homework" in u or "/homeworks" in u:
+            return False
+        if "/detail" in u:
+            return False
+        if "/tasks/" in u or "/challenges" in u or "/shixuns/" in u:
+            return True
+        return False
+    except Exception:
+        return False
+
+
 class BrowserSession:
     """基于 Playwright CDP 的浏览器会话上下文管理器。
 
@@ -147,6 +198,7 @@ class BrowserSession:
         url_keyword: str = "educoder.net",
         fallback_first: bool = True,
         prefer_type: str = "any",
+        auto_penetrate: bool = False,
     ) -> Page:
         """优先定位包含指定关键字的目标标签页。
 
@@ -154,9 +206,11 @@ class BrowserSession:
             url_keyword: 匹配的 URL 或标题关键字，默认 'educoder.net'
             fallback_first: 若未找到匹配标签页，是否容错回退至第一个可用标签页
             prefer_type: 页面偏好类型，可选值:
-                - 'any': 保持默认优先级（优先实训关卡，其次作业列表）
-                - 'classroom': 优先匹配课堂作业列表页（/shixun_homework、/homeworks、/classrooms/\\d+），未找到才回退至实训关卡或其它页面
-                - 'shixun': 优先匹配实训关卡作答页（/tasks/ 或 /shixuns/），未找到才回退至作业列表页
+                - 'any': 保持默认优先级（优先实训关卡，其次跳板详情，其次作业列表）
+                - 'classroom': 优先匹配课堂作业列表页（排除 /detail 与 /tasks/），未找到才回退
+                - 'springboard': 优先匹配实训跳板详情页（/detail 或仅有开启挑战按钮的介绍页）
+                - 'shixun': 优先匹配真正的做题关卡页（含编辑器或答题容器），未找到时匹配跳板详情页，最后回退作业列表页
+            auto_penetrate: 若命中的页面处于跳板详情页，是否自动调用穿透逻辑直达关卡 IDE
 
         Returns:
             Page: 目标页面实例
@@ -176,61 +230,113 @@ class BrowserSession:
                 try:
                     if url_keyword.lower() in page.url.lower() or url_keyword.lower() in page.title().lower():
                         logger.info(f"已精准匹配自定义目标页面: [{page.title()}]({page.url})")
+                        if auto_penetrate and is_springboard_page(page):
+                            from src.executor.classroom_orchestrator import penetrate_detail_springboard
+                            ctx = getattr(page, "context", None) or (self.browser.contexts[0] if self.browser and self.browser.contexts else None)
+                            page = penetrate_detail_springboard(page, ctx)
                         return page
                 except Exception:
                     continue
 
-        def _is_shixun(p: Page) -> bool:
-            try:
-                u = p.url.lower()
-                return "educoder.net" in u and ("/tasks/" in u or "/shixuns/" in u)
-            except Exception:
-                return False
-
-        def _is_classroom(p: Page) -> bool:
-            try:
-                u = p.url.lower()
-                if "educoder.net" in u:
-                    return bool("/shixun_homework" in u or "/homeworks" in u or re.search(r"/classrooms/\d+", u))
-            except Exception:
-                return False
-
         p_type = (prefer_type or "any").lower()
 
-        # 2. 根据 prefer_type 优先级进行定向匹配
+        # 2. 根据 prefer_type 优先级进行定向解耦匹配
+        matched_page = None
+
         if p_type == "classroom":
             # 优先匹配课堂作业列表页
             for page in current_pages:
-                if _is_classroom(page):
+                if is_classroom_page(page):
                     try:
                         logger.info(f"已精准匹配课堂作业列表页面: [{page.title()}]({page.url})")
                     except Exception:
                         pass
-                    return page
-            # 未找到时回退至实训关卡作答页
+                    matched_page = page
+                    break
+            if not matched_page:
+                # 回退：实训做题关卡 -> 跳板详情页
+                for page in current_pages:
+                    if is_shixun_task_page(page):
+                        matched_page = page
+                        break
+            if not matched_page:
+                for page in current_pages:
+                    if is_springboard_page(page):
+                        matched_page = page
+                        break
+
+        elif p_type == "springboard":
+            # 优先匹配跳板详情页
             for page in current_pages:
-                if _is_shixun(page):
+                if is_springboard_page(page):
                     try:
-                        logger.info(f"课堂列表未命中，回退匹配实训关卡页面: [{page.title()}]({page.url})")
+                        logger.info(f"已精准匹配实训跳板详情页面: [{page.title()}]({page.url})")
                     except Exception:
                         pass
-                    return page
+                    matched_page = page
+                    break
+            if not matched_page:
+                for page in current_pages:
+                    if is_shixun_task_page(page):
+                        matched_page = page
+                        break
+            if not matched_page:
+                for page in current_pages:
+                    if is_classroom_page(page):
+                        matched_page = page
+                        break
+
+        elif p_type == "shixun":
+            # 优先匹配真正关卡做题页 (排除跳板与列表)
+            for page in current_pages:
+                if is_shixun_task_page(page):
+                    try:
+                        logger.info(f"已精准匹配实训关卡做题页面: [{page.title()}]({page.url})")
+                    except Exception:
+                        pass
+                    matched_page = page
+                    break
+            # 关卡做题页未命中时，尝试匹配跳板详情页（便于后续穿透）
+            if not matched_page:
+                for page in current_pages:
+                    if is_springboard_page(page):
+                        try:
+                            logger.info(f"关卡做题页未命中，匹配到实训跳板详情页面: [{page.title()}]({page.url})")
+                        except Exception:
+                            pass
+                        matched_page = page
+                        break
+            # 最后回退至课堂列表页
+            if not matched_page:
+                for page in current_pages:
+                    if is_classroom_page(page):
+                        matched_page = page
+                        break
+
         else:
-            # prefer_type == "shixun" 或 "any"：保持默认优先级（实训关卡优先，其次作业列表）
+            # prefer_type == 'any'：优先做题关卡 -> 课堂作业列表 -> 跳板详情
             for page in current_pages:
-                if _is_shixun(page):
-                    try:
-                        logger.info(f"已精准匹配实训关卡作答页面: [{page.title()}]({page.url})")
-                    except Exception:
-                        pass
-                    return page
-            for page in current_pages:
-                if _is_classroom(page):
-                    try:
-                        logger.info(f"已精准匹配课堂作业列表页面: [{page.title()}]({page.url})")
-                    except Exception:
-                        pass
-                    return page
+                if is_shixun_task_page(page):
+                    matched_page = page
+                    break
+            if not matched_page:
+                for page in current_pages:
+                    if is_classroom_page(page):
+                        matched_page = page
+                        break
+            if not matched_page:
+                for page in current_pages:
+                    if is_springboard_page(page):
+                        matched_page = page
+                        break
+
+        if matched_page:
+            if auto_penetrate and is_springboard_page(matched_page):
+                logger.info(f"已开启 auto_penetrate=True，正在穿透跳板页面 [{matched_page.url}]...")
+                from src.executor.classroom_orchestrator import penetrate_detail_springboard
+                ctx = getattr(matched_page, "context", None) or (self.browser.contexts[0] if self.browser and self.browser.contexts else None)
+                matched_page = penetrate_detail_springboard(matched_page, ctx)
+            return matched_page
 
         # 3. 再次按 URL 包含关键字匹配 (优先非纯 /classrooms 总览页)
         for page in current_pages:
